@@ -54,9 +54,16 @@ jobs:
         run: |
           set -o pipefail
           DD="$RUNNER_TEMP/cloudn-build"
-          xcodebuild -project Cloudn.xcodeproj -scheme Cloudn -configuration Release \
+          if ! xcodebuild -project Cloudn.xcodeproj -scheme Cloudn -configuration Release \
             -destination 'generic/platform=iOS' -derivedDataPath "$DD" \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build | tail -40
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1; then
+            echo "===== BUILD FAILED: errors ====="
+            grep -nE "error:|BUILD FAILED|The following build commands failed" build.log | head -300 || true
+            echo "===== tail -60 ====="
+            tail -60 build.log
+            exit 1
+          fi
+          tail -5 build.log
           mkdir -p Payload
           cp -R "$DD/Build/Products/Release-iphoneos/Cloudn.app" Payload/
           VERSION=$(grep -m1 'MARKETING_VERSION' Cloudn.xcodeproj/project.pbxproj | sed -E 's/.*= *([^;]+);/\1/')
@@ -75,6 +82,14 @@ jobs:
             upstream-src/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: upstream-src/build.log
+          if-no-files-found: ignore
 
       - name: Publish ported source to branch ios16
         run: |
