@@ -518,6 +518,57 @@ r'''            .environment(\.accentTint, model.settings.accentUIColor)
     # 9. 兼容层文件
     add_compat_file()
 
+    # 11. CloudnKit 里 iOS 17 才有的 API：Network.ProxyConfiguration / DiscardingTaskGroup
+    #     (a) URLSession 代理改回 iOS 7 就有的 connectionProxyDictionary
+    sub_file('CloudnKit/Sources/CloudnKit/Support/NetworkProxy.swift',
+             '#if canImport(Network)\nimport Network\n#endif',
+             '#if canImport(CFNetwork)\nimport CFNetwork\n#endif\n#if canImport(Network)\nimport Network\n#endif')
+    sub_file('CloudnKit/Sources/CloudnKit/Support/NetworkProxy.swift',
+'''    public func apply(to config: URLSessionConfiguration) {
+        #if canImport(Network)
+        if let proxy = proxyConfiguration { config.proxyConfigurations = [proxy] }
+        #endif
+    }''',
+'''    public func apply(to config: URLSessionConfiguration) {
+        guard isValid else { return }
+        #if canImport(CFNetwork)
+        let h = host.trimmingCharacters(in: .whitespaces)
+        switch kind {
+        case .http:
+            config.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable as String: true,
+                kCFNetworkProxiesHTTPProxy as String: h,
+                kCFNetworkProxiesHTTPPort as String: port,
+                kCFNetworkProxiesHTTPSEnable as String: true,
+                kCFNetworkProxiesHTTPSProxy as String: h,
+                kCFNetworkProxiesHTTPSPort as String: port
+            ]
+        case .socks5:
+            config.connectionProxyDictionary = [
+                kCFNetworkProxiesSOCKSEnable as String: true,
+                kCFNetworkProxiesSOCKSProxy as String: h,
+                kCFNetworkProxiesSOCKSPort as String: port
+            ]
+        }
+        #endif
+    }''')
+    sub_file('CloudnKit/Sources/CloudnKit/Support/NetworkProxy.swift',
+             '    /// 同一份代理配置也给 WKWebView 的数据仓库用（登录页、嗅探、隐藏网页）\n    public var proxyConfiguration: ProxyConfiguration? {',
+             '    /// 同一份代理配置也给 WKWebView 的数据仓库用（登录页、嗅探、隐藏网页）。ProxyConfiguration 是 iOS 17+\n    @available(iOS 17.0, macOS 14.0, *)\n    public var proxyConfiguration: ProxyConfiguration? {')
+    #     (b) WKWebView 数据仓库的代理只在 iOS 17+ 设置，16 上跳过
+    sub_file('Cloudn/Services/WebProxy.swift',
+             '        proxyConfigurations = NetworkProxy.current?.proxyConfiguration.map { [$0] } ?? []',
+'''        if #available(iOS 17.0, *) {
+            proxyConfigurations = NetworkProxy.current?.proxyConfiguration.map { [$0] } ?? []
+        }''')
+    #     (c) DiscardingTaskGroup 是 iOS 17+，换成普通 TaskGroup（结果丢弃即可）
+    sub_file('CloudnKit/Sources/CloudnKit/Torrent/TorrentTransfer.swift',
+             'try await withThrowingDiscardingTaskGroup { group in',
+             'try await withThrowingTaskGroup(of: Void.self) { group in')
+    sub_file('CloudnKit/Sources/CloudnKit/Torrent/TorrentTransfer.swift',
+             'await withDiscardingTaskGroup { group in',
+             'await withTaskGroup(of: Void.self) { group in')
+
     # 10. README 徽标
     sub_file('README.md', 'iOS-17%2B-1f1e1c', 'iOS-16.4%2B-1f1e1c', required=False)
     sub_file('README.md', 'iOS 17+', 'iOS 16.4+', required=False)

@@ -78,6 +78,8 @@ gh release download ios16-latest -R <你>/Cloudn-iOS16 -p '*.ipa'
 | `.navigationDestination(item:)` | `.cnNavigationDestination(item:)`（`isPresented` + 绑定桥接） |
 | `.snappy` / `.spring(duration:)` | `.cnSnappy` / `.cnSpring(duration:)`（等价曲线） |
 | `MainActor.assumeIsolated { … }` | `cnAssumeMain { … }`（同为主线程断言，避开 iOS 17 符号） |
+| CloudnKit `ProxyConfiguration` / `proxyConfigurations` | URLSession 用 `connectionProxyDictionary`；WKWebView 代理仅 iOS 17+ 生效 |
+| `withThrowingDiscardingTaskGroup` / `withDiscardingTaskGroup` | 普通 `TaskGroup`（结果丢弃） |
 
 兼容层代码集中在 `Cloudn/Compat/CNCompat.swift`（由脚本生成）。
 

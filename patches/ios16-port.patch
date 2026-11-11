@@ -865,6 +865,20 @@ index 9c32376..ae642ad 100644
          }
      }
  
+diff --git a/Cloudn/Services/WebProxy.swift b/Cloudn/Services/WebProxy.swift
+index 7c429a7..aec484c 100644
+--- a/Cloudn/Services/WebProxy.swift
++++ b/Cloudn/Services/WebProxy.swift
+@@ -7,6 +7,8 @@ extension WKWebsiteDataStore {
+     /// 内嵌网页也走应用内代理（设置页「网络代理」）；没设置时跟随系统
+     @MainActor
+     func useAppProxy() {
+-        proxyConfigurations = NetworkProxy.current?.proxyConfiguration.map { [$0] } ?? []
++        if #available(iOS 17.0, *) {
++            proxyConfigurations = NetworkProxy.current?.proxyConfiguration.map { [$0] } ?? []
++        }
+     }
+ }
 diff --git a/Cloudn/Views/Accounts/AccountListView.swift b/Cloudn/Views/Accounts/AccountListView.swift
 index d9e6131..8e99ff9 100644
 --- a/Cloudn/Views/Accounts/AccountListView.swift
@@ -2234,6 +2248,78 @@ index 637a94f..d34dbf5 100644
      products: [
          .library(name: "CloudnKit", targets: ["CloudnKit"])
      ],
+diff --git a/CloudnKit/Sources/CloudnKit/Support/NetworkProxy.swift b/CloudnKit/Sources/CloudnKit/Support/NetworkProxy.swift
+index c6bc98f..b9fa3c4 100644
+--- a/CloudnKit/Sources/CloudnKit/Support/NetworkProxy.swift
++++ b/CloudnKit/Sources/CloudnKit/Support/NetworkProxy.swift
+@@ -3,6 +3,9 @@ import Foundation
+ #if canImport(FoundationNetworking)
+ import FoundationNetworking
+ #endif
++#if canImport(CFNetwork)
++import CFNetwork
++#endif
+ #if canImport(Network)
+ import Network
+ #endif
+@@ -57,13 +60,32 @@ public struct NetworkProxy: Equatable, Sendable {
+     }
+ 
+     public func apply(to config: URLSessionConfiguration) {
+-        #if canImport(Network)
+-        if let proxy = proxyConfiguration { config.proxyConfigurations = [proxy] }
++        guard isValid else { return }
++        #if canImport(CFNetwork)
++        let h = host.trimmingCharacters(in: .whitespaces)
++        switch kind {
++        case .http:
++            config.connectionProxyDictionary = [
++                kCFNetworkProxiesHTTPEnable as String: true,
++                kCFNetworkProxiesHTTPProxy as String: h,
++                kCFNetworkProxiesHTTPPort as String: port,
++                kCFNetworkProxiesHTTPSEnable as String: true,
++                kCFNetworkProxiesHTTPSProxy as String: h,
++                kCFNetworkProxiesHTTPSPort as String: port
++            ]
++        case .socks5:
++            config.connectionProxyDictionary = [
++                kCFNetworkProxiesSOCKSEnable as String: true,
++                kCFNetworkProxiesSOCKSProxy as String: h,
++                kCFNetworkProxiesSOCKSPort as String: port
++            ]
++        }
+         #endif
+     }
+ 
+     #if canImport(Network)
+-    /// 同一份代理配置也给 WKWebView 的数据仓库用（登录页、嗅探、隐藏网页）
++    /// 同一份代理配置也给 WKWebView 的数据仓库用（登录页、嗅探、隐藏网页）。ProxyConfiguration 是 iOS 17+
++    @available(iOS 17.0, macOS 14.0, *)
+     public var proxyConfiguration: ProxyConfiguration? {
+         guard let p = NWEndpoint.Port(rawValue: UInt16(port)) else { return nil }
+         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host.trimmingCharacters(in: .whitespaces)), port: p)
+diff --git a/CloudnKit/Sources/CloudnKit/Torrent/TorrentTransfer.swift b/CloudnKit/Sources/CloudnKit/Torrent/TorrentTransfer.swift
+index 27d3365..6b1adb6 100644
+--- a/CloudnKit/Sources/CloudnKit/Torrent/TorrentTransfer.swift
++++ b/CloudnKit/Sources/CloudnKit/Torrent/TorrentTransfer.swift
+@@ -64,7 +64,7 @@ struct TorrentTransfer {
+         if await swarm.isComplete { return swarm }
+         let peerId = PeerWire.makePeerId()
+         let began = Date()
+-        try await withThrowingDiscardingTaskGroup { group in
++        try await withThrowingTaskGroup(of: Void.self) { group in
+             group.addTask { await discover(swarm, peerId: peerId) }
+             while !(await swarm.isComplete) {
+                 try Task.checkCancellation()
+@@ -105,7 +105,7 @@ struct TorrentTransfer {
+                 if dhtDue { lastDHT = now }
+                 let announce = TrackerClient.Announce(infoHash: magnet.infoHash, peerId: peerId, downloaded: await swarm.downloadedBytes,
+                                                       left: await swarm.leftBytes)
+-                await withDiscardingTaskGroup { group in
++                await withTaskGroup(of: Void.self) { group in
+                     for t in trackers {
+                         group.addTask { [network, client] in
+                             do {
 diff --git a/README.md b/README.md
 index 19eff5f..19a1d33 100644
 --- a/README.md
