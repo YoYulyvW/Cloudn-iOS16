@@ -91,18 +91,6 @@ jobs:
           path: upstream-src/build.log
           if-no-files-found: ignore
 
-      - name: Publish ported source to branch ios16
-        run: |
-          set -euo pipefail
-          cd upstream-src
-          rm -rf Payload *.ipa SHA256SUMS.txt build .build
-          git checkout --orphan ios16
-          git add -A
-          git -c user.name='github-actions' -c user.email='github-actions@users.noreply.github.com' \
-            commit -qm "iOS 16.4 port of upstream ${{ env.UPSTREAM_SHA }} (${{ env.VERSION }})"
-          git push --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ios16
-        continue-on-error: true
-
       - name: Publish rolling prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -124,6 +112,18 @@ jobs:
             gh release create "$TAG" --title "iOS 16.4 最新构建" --prerelease --notes-file NOTES.md \
               "upstream-src/${{ env.IPA }}" upstream-src/SHA256SUMS.txt
           fi
+
+      - name: Publish ported source to branch ios16
+        run: |
+          set -euo pipefail
+          cd upstream-src
+          rm -rf Payload *.ipa SHA256SUMS.txt build .build .github/workflows
+          git checkout --orphan ios16
+          git add -A
+          git -c user.name='github-actions' -c user.email='github-actions@users.noreply.github.com' \
+            commit -qm "iOS 16.4 port of upstream ${{ env.UPSTREAM_SHA }} (${{ env.VERSION }})"
+          git push --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ios16
+        continue-on-error: true
 
       - name: Open issue when port breaks
         if: failure()
