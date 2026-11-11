@@ -394,8 +394,18 @@ def main():
     sub_file('Cloudn.xcodeproj/project.pbxproj', 'IPHONEOS_DEPLOYMENT_TARGET = 17.0;', 'IPHONEOS_DEPLOYMENT_TARGET = 16.4;')
     sub_file('CloudnKit/Package.swift', '.iOS(.v17)', '.iOS(.v16)')
 
-    # 2. Observation -> Combine
-    for rel, cls in OBSERVABLE_FILES.items():
+    # 2. Observation -> Combine（动态发现所有 @Observable 类，上游新增也能覆盖）
+    discovered = {}
+    for fp in ROOT.joinpath('Cloudn').rglob('*.swift'):
+        txt = fp.read_text(encoding='utf-8')
+        if '@Observable' not in txt:
+            continue
+        m = re.search(r'@Observable\b[\s\S]{0,300}?\bfinal class\s+(\w+)', txt)
+        if m:
+            discovered[fp.relative_to(ROOT).as_posix()] = m.group(1)
+    targets = dict(OBSERVABLE_FILES)
+    targets.update(discovered)
+    for rel, cls in targets.items():
         convert_observable(rel, cls)
 
     # 3. 全局 SwiftUI 修饰符改名
