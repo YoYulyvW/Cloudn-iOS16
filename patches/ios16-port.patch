@@ -2249,7 +2249,7 @@ index 637a94f..d34dbf5 100644
          .library(name: "CloudnKit", targets: ["CloudnKit"])
      ],
 diff --git a/CloudnKit/Sources/CloudnKit/Support/NetworkProxy.swift b/CloudnKit/Sources/CloudnKit/Support/NetworkProxy.swift
-index c6bc98f..b9fa3c4 100644
+index c6bc98f..2a2d6cf 100644
 --- a/CloudnKit/Sources/CloudnKit/Support/NetworkProxy.swift
 +++ b/CloudnKit/Sources/CloudnKit/Support/NetworkProxy.swift
 @@ -3,6 +3,9 @@ import Foundation
@@ -2274,18 +2274,18 @@ index c6bc98f..b9fa3c4 100644
 +        switch kind {
 +        case .http:
 +            config.connectionProxyDictionary = [
-+                kCFNetworkProxiesHTTPEnable as String: true,
-+                kCFNetworkProxiesHTTPProxy as String: h,
-+                kCFNetworkProxiesHTTPPort as String: port,
-+                kCFNetworkProxiesHTTPSEnable as String: true,
-+                kCFNetworkProxiesHTTPSProxy as String: h,
-+                kCFNetworkProxiesHTTPSPort as String: port
++                "HTTPEnable": true,
++                "HTTPProxy": h,
++                "HTTPPort": port,
++                "HTTPSEnable": true,
++                "HTTPSProxy": h,
++                "HTTPSPort": port
 +            ]
 +        case .socks5:
 +            config.connectionProxyDictionary = [
-+                kCFNetworkProxiesSOCKSEnable as String: true,
-+                kCFNetworkProxiesSOCKSProxy as String: h,
-+                kCFNetworkProxiesSOCKSPort as String: port
++                "SOCKSEnable": true,
++                "SOCKSProxy": h,
++                "SOCKSPort": port
 +            ]
 +        }
          #endif

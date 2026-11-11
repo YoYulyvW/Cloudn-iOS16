@@ -536,18 +536,18 @@ r'''            .environment(\.accentTint, model.settings.accentUIColor)
         switch kind {
         case .http:
             config.connectionProxyDictionary = [
-                kCFNetworkProxiesHTTPEnable as String: true,
-                kCFNetworkProxiesHTTPProxy as String: h,
-                kCFNetworkProxiesHTTPPort as String: port,
-                kCFNetworkProxiesHTTPSEnable as String: true,
-                kCFNetworkProxiesHTTPSProxy as String: h,
-                kCFNetworkProxiesHTTPSPort as String: port
+                "HTTPEnable": true,
+                "HTTPProxy": h,
+                "HTTPPort": port,
+                "HTTPSEnable": true,
+                "HTTPSProxy": h,
+                "HTTPSPort": port
             ]
         case .socks5:
             config.connectionProxyDictionary = [
-                kCFNetworkProxiesSOCKSEnable as String: true,
-                kCFNetworkProxiesSOCKSProxy as String: h,
-                kCFNetworkProxiesSOCKSPort as String: port
+                "SOCKSEnable": true,
+                "SOCKSProxy": h,
+                "SOCKSPort": port
             ]
         }
         #endif
