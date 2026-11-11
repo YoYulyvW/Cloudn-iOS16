@@ -569,6 +569,38 @@ r'''            .environment(\.accentTint, model.settings.accentUIColor)
              'await withDiscardingTaskGroup { group in',
              'await withTaskGroup(of: Void.self) { group in')
 
+    # 12. 应用内「检查更新」指向本移植仓库，并支持同版本号的构建号递增
+    sub_file('CloudnKit/Sources/CloudnKit/Support/UpdateChecker.swift',
+             'public static let repository = "mengangs/Cloudn"',
+             'public static let repository = "YoYulyvW/Cloudn-iOS16"')
+    sub_file('CloudnKit/Sources/CloudnKit/Support/UpdateChecker.swift',
+             '    /// IPA 附件大小（字节）；没有附件为 0\n    public var ipaSize: Int64 = 0',
+             '    /// IPA 附件大小（字节）；没有附件为 0\n    public var ipaSize: Int64 = 0\n    /// 构建号（发布 tag 形如 v1.4.1-b1043 的末段数字；普通上游 Release 为 0）\n    public var build: Int = 0')
+    sub_file('CloudnKit/Sources/CloudnKit/Support/UpdateChecker.swift',
+             '    public static func check(current: String, includePrerelease: Bool = false, client: HTTPClient = .shared,',
+             '    public static func check(current: String, currentBuild: Int = 0, includePrerelease: Bool = false, client: HTTPClient = .shared,')
+    sub_file('CloudnKit/Sources/CloudnKit/Support/UpdateChecker.swift',
+             '        guard let release, isNewer(release.version, than: current) else { return nil }\n        return release',
+             '        guard let release else { return nil }\n        if isNewer(release.version, than: current) { return release }\n        // 同一上游版本号下，本仓库每次构建的 tag 带 -b<构建号>：构建号更大的算更新\n        if normalize(release.version) == normalize(current), release.build > currentBuild { return release }\n        return nil')
+    sub_file('CloudnKit/Sources/CloudnKit/Support/UpdateChecker.swift',
+             '                          isPrerelease: json["prerelease"].bool, ipaSize: asset?["size"].int64 ?? 0)',
+             '                          isPrerelease: json["prerelease"].bool, ipaSize: asset?["size"].int64 ?? 0, build: buildNumber(from: tag))')
+    sub_file('CloudnKit/Sources/CloudnKit/Support/UpdateChecker.swift',
+             '    /// 去掉 v 前缀与 -beta 之类的后缀\n    static func normalize(_ tag: String) -> String {',
+             '    /// 从发布标签里取构建号：v1.4.1-b1043 -> 1043；没有 -b 后缀返回 0\n    static func buildNumber(from tag: String) -> Int {\n        let s = tag.trimmed\n        guard let r = s.range(of: "-b", options: .backwards) else { return 0 }\n        let digits = s[r.upperBound...].prefix { $0.isNumber }\n        return Int(digits) ?? 0\n    }\n\n    /// 去掉 v 前缀与 -beta 之类的后缀\n    static func normalize(_ tag: String) -> String {')
+    sub_file('CloudnKit/Sources/CloudnKit/Support/UpdateChecker.swift',
+             '            .max { isNewer($1.version, than: $0.version) }',
+             '            .max { a, b in\n                if isNewer(a.version, than: b.version) { return false }\n                if isNewer(b.version, than: a.version) { return true }\n                return a.build < b.build\n            }')
+    sub_file('Cloudn/App/AppModel.swift',
+             '    static var currentVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0" }',
+             '    static var currentVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0" }\n    static var currentBuild: Int { Int(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0") ?? 0 }')
+    sub_file('Cloudn/App/AppModel.swift',
+             'UpdateChecker.check(current: Self.currentVersion, includePrerelease: settings.acceptPrerelease)',
+             'UpdateChecker.check(current: Self.currentVersion, currentBuild: Self.currentBuild, includePrerelease: settings.acceptPrerelease)')
+    sub_file('Cloudn/Views/Settings/SettingsView.swift',
+             'UpdateChecker.check(current: AppModel.currentVersion, includePrerelease: app.settings.acceptPrerelease)',
+             'UpdateChecker.check(current: AppModel.currentVersion, currentBuild: AppModel.currentBuild, includePrerelease: app.settings.acceptPrerelease)')
+
     # 10. README 徽标
     sub_file('README.md', 'iOS-17%2B-1f1e1c', 'iOS-16.4%2B-1f1e1c', required=False)
     sub_file('README.md', 'iOS 17+', 'iOS 16.4+', required=False)

@@ -54,6 +54,10 @@ jobs:
         run: |
           set -o pipefail
           DD="$RUNNER_TEMP/cloudn-build"
+          BUILD_NO=$((1000 + ${GITHUB_RUN_NUMBER:-0}))
+          echo "BUILD_NO=$BUILD_NO" >> "$GITHUB_ENV"
+          # 每次构建把 CFBundleVersion 抬到 1000+run，应用内更新才能识别同版本号的新构建
+          perl -pi -e "s/CURRENT_PROJECT_VERSION = \\d+;/CURRENT_PROJECT_VERSION = ${BUILD_NO};/g" Cloudn.xcodeproj/project.pbxproj
           if ! xcodebuild -project Cloudn.xcodeproj -scheme Cloudn -configuration Release \
             -destination 'generic/platform=iOS' -derivedDataPath "$DD" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1; then
@@ -68,7 +72,7 @@ jobs:
           cp -R "$DD/Build/Products/Release-iphoneos/Cloudn.app" Payload/
           VERSION=$(grep -m1 'MARKETING_VERSION' Cloudn.xcodeproj/project.pbxproj | sed -E 's/.*= *([^;]+);/\1/')
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          IPA="Cloudn-ios16.4-${VERSION}.ipa"
+          IPA="Cloudn-ios16.4-${VERSION}-b${BUILD_NO}.ipa"
           zip -qry "$IPA" Payload
           shasum -a 256 "$IPA" | tee SHA256SUMS.txt
           echo "IPA=$IPA" >> "$GITHUB_ENV"
@@ -76,7 +80,7 @@ jobs:
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Cloudn-ios16.4-${{ env.VERSION }}-${{ env.UPSTREAM_SHA }}
+          name: Cloudn-ios16.4-${{ env.VERSION }}-b${{ env.BUILD_NO }}-${{ env.UPSTREAM_SHA }}
           path: |
             upstream-src/Cloudn-ios16.4-*.ipa
             upstream-src/SHA256SUMS.txt
@@ -96,11 +100,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="ios16-latest"
+          TAG="v${{ env.VERSION }}-b${{ env.BUILD_NO }}"
           {
             echo "基于上游 ${{ env.UPSTREAM_SHA }} 自动构建的 iOS 16.4 未签名 IPA。"
             echo
-            echo "- 版本: ${{ env.VERSION }}"
+            echo "- 版本: ${{ env.VERSION }} (build ${{ env.BUILD_NO }})"
             echo "- 构建时间: $(date -u '+%Y-%m-%d %H:%M UTC')"
             echo "- 安装: 用 TrollStore / AltStore / Sideloadly 重签名安装"
             echo "- 源码分支: ios16"
@@ -109,7 +113,7 @@ jobs:
             gh release upload "$TAG" "upstream-src/${{ env.IPA }}" upstream-src/SHA256SUMS.txt --clobber
             gh release edit "$TAG" --notes-file NOTES.md
           else
-            gh release create "$TAG" --title "iOS 16.4 最新构建" --prerelease --notes-file NOTES.md \
+            gh release create "$TAG" --title "Cloudn iOS 16.4 v${{ env.VERSION }} (b${{ env.BUILD_NO }})" --notes-file NOTES.md \
               "upstream-src/${{ env.IPA }}" upstream-src/SHA256SUMS.txt
           fi
 
@@ -121,7 +125,7 @@ jobs:
           git checkout --orphan ios16
           git add -A
           git -c user.name='github-actions' -c user.email='github-actions@users.noreply.github.com' \
-            commit -qm "iOS 16.4 port of upstream ${{ env.UPSTREAM_SHA }} (${{ env.VERSION }})"
+            commit -qm "iOS 16.4 port of upstream ${{ env.UPSTREAM_SHA }} (${{ env.VERSION }} build ${{ env.BUILD_NO }})"
           git push --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ios16
         continue-on-error: true
 

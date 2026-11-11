@@ -3,7 +3,7 @@
 把 [mengangs/Cloudn](https://github.com/mengangs/Cloudn)（原生 SwiftUI，官方要求 iOS 17+）移植到 **iOS 16.4** 可编译、可运行的版本，并用 GitHub Actions 做到：
 
 - **自动同步上游**：每次运行都重新拉取 `mengangs/Cloudn` 的最新代码，再套用移植脚本，上游发新版即自动带上；
-- **自动构建未签名 IPA**：macOS runner 上 `xcodebuild` 出未签名 IPA，挂到 `ios16-latest` 预发布（Releases）并保留 30 天 artifact；
+- **自动构建未签名 IPA**：macOS runner 上 `xcodebuild` 出未签名 IPA，挂到版本化 Release（供应用内更新读取）并保留 30 天 artifact；
 - **自动产出可直接打开的源码分支**：移植后的完整源码被推送到本仓库的 `ios16` 分支，`git clone` 后用 Xcode 打开即可。
 
 > 本仓库只存放「移植层」（脚本 + 工作流 + 补丁），不复制上游代码，因此永远跟上游保持一致。
@@ -31,6 +31,7 @@
 | `scripts/build_ipa.sh` | 本机 macOS 一键构建 |
 | `patches/ios16-port.patch` | 完整 unified diff，供审阅 / 手动 `git apply` |
 | `ios16` 分支 | 每次构建成功后自动更新的「已移植源码」快照 |
+| 应用内更新 | `UpdateChecker.repository` 指向本仓库；Release tag `v<版本>-b<构建号>`，CFBundleVersion=1000+run |
 
 ## 启用（把本目录变成一个 GitHub 仓库）
 
@@ -45,7 +46,7 @@ gh repo create <你的账号>/Cloudn-iOS16 --public --source=. --push
 推送后到仓库 **Actions** 页确认 workflow 已启用（默认启用），点一次 **Run workflow** 验证：
 
 1. 构建通过 → 生成 `Cloudn-ios16.4-<版本>.ipa`；
-2. Releases 出现 `ios16-latest`（pre-release）；
+2. Releases 出现 `v<版本>-b<构建号>`（正式 Release；应用内「检查更新」读它）；
 3. 分支列表出现 `ios16`（已移植源码）。
 
 > 若仓库设置了 "Workflow permissions = Read repository contents"，请在 **Settings → Actions → General** 改成 **Read and write**，否则发布 Release / 推分支会 403。
@@ -59,7 +60,7 @@ gh repo create <你的账号>/Cloudn-iOS16 --public --source=. --push
 - 或把源码分支 `ios16` clone 下来，用 Xcode 选自己设备运行。
 
 ```bash
-gh release download ios16-latest -R <你>/Cloudn-iOS16 -p '*.ipa'
+gh release download -R <你>/Cloudn-iOS16 -p '*.ipa'
 ```
 
 ## iOS 16.4 兼容性改动
