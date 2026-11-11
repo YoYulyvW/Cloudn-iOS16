@@ -1,0 +1,125 @@
+name: Build iOS 16.4 IPA (auto-sync upstream)
+
+# 每次运行都从上游 mengangs/Cloudn 拉最新代码 -> 应用 iOS 16.4 移植 -> 构建未签名 IPA。
+# 因此上游一发新版，这里下一次运行就会自动带上（默认每天一次，也可手动触发）。
+# 同时把移植后的完整源码推送到本仓库的 ios16 分支，方便直接 clone / Xcode 打开。
+
+on:
+  schedule:
+    - cron: "0 3 * * *"        # 每天 03:00 UTC（北京时间 11:00）
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: build-ios16
+  cancel-in-progress: true
+
+env:
+  UPSTREAM: https://github.com/mengangs/Cloudn.git
+
+jobs:
+  build:
+    name: Port & Build
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Checkout port repo
+        uses: actions/checkout@v4
+
+      - name: Fetch upstream source
+        run: |
+          set -euo pipefail
+          rm -rf upstream-src
+          git clone --depth 1 "$UPSTREAM" upstream-src
+          cd upstream-src
+          SHA=$(git rev-parse --short HEAD)
+          echo "UPSTREAM_SHA=$SHA" >> "$GITHUB_ENV"
+          echo "上游版本: $SHA $(git log -1 --format=%s)"
+
+      - name: Apply iOS 16.4 port
+        run: python3 scripts/port_ios16.py upstream-src
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Build unsigned IPA
+        working-directory: upstream-src
+        run: |
+          set -o pipefail
+          DD="$RUNNER_TEMP/cloudn-build"
+          xcodebuild -project Cloudn.xcodeproj -scheme Cloudn -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath "$DD" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build | tail -40
+          mkdir -p Payload
+          cp -R "$DD/Build/Products/Release-iphoneos/Cloudn.app" Payload/
+          VERSION=$(grep -m1 'MARKETING_VERSION' Cloudn.xcodeproj/project.pbxproj | sed -E 's/.*= *([^;]+);/\1/')
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          IPA="Cloudn-ios16.4-${VERSION}.ipa"
+          zip -qry "$IPA" Payload
+          shasum -a 256 "$IPA" | tee SHA256SUMS.txt
+          echo "IPA=$IPA" >> "$GITHUB_ENV"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cloudn-ios16.4-${{ env.VERSION }}-${{ env.UPSTREAM_SHA }}
+          path: |
+            upstream-src/Cloudn-ios16.4-*.ipa
+            upstream-src/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish ported source to branch ios16
+        run: |
+          set -euo pipefail
+          cd upstream-src
+          rm -rf Payload *.ipa SHA256SUMS.txt build .build
+          git checkout --orphan ios16
+          git add -A
+          git -c user.name='github-actions' -c user.email='github-actions@users.noreply.github.com' \
+            commit -qm "iOS 16.4 port of upstream ${{ env.UPSTREAM_SHA }} (${{ env.VERSION }})"
+          git push --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ios16
+        continue-on-error: true
+
+      - name: Publish rolling prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="ios16-latest"
+          {
+            echo "基于上游 ${{ env.UPSTREAM_SHA }} 自动构建的 iOS 16.4 未签名 IPA。"
+            echo
+            echo "- 版本: ${{ env.VERSION }}"
+            echo "- 构建时间: $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "- 安装: 用 TrollStore / AltStore / Sideloadly 重签名安装"
+            echo "- 源码分支: ios16"
+          } > NOTES.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "upstream-src/${{ env.IPA }}" upstream-src/SHA256SUMS.txt --clobber
+            gh release edit "$TAG" --notes-file NOTES.md
+          else
+            gh release create "$TAG" --title "iOS 16.4 最新构建" --prerelease --notes-file NOTES.md \
+              "upstream-src/${{ env.IPA }}" upstream-src/SHA256SUMS.txt
+          fi
+
+      - name: Open issue when port breaks
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "上游 mengangs/Cloudn 出现了不兼容改动，scripts/port_ios16.py 需要更新。"
+            echo
+            echo "运行日志: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > issue-body.md
+          gh issue create \
+            --title "上游更新后 iOS 16.4 移植构建失败 ($(date -u '+%F'))" \
+            --body-file issue-body.md || true

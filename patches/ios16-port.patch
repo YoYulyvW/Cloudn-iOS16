@@ -1,0 +1,2249 @@
+diff --git a/Cloudn.xcodeproj/project.pbxproj b/Cloudn.xcodeproj/project.pbxproj
+index 9417e18..7527d0e 100644
+--- a/Cloudn.xcodeproj/project.pbxproj
++++ b/Cloudn.xcodeproj/project.pbxproj
+@@ -311,7 +311,7 @@
+ 					"DEBUG=1",
+ 					"$(inherited)",
+ 				);
+-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
++				IPHONEOS_DEPLOYMENT_TARGET = 16.4;
+ 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+ 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+ 				ONLY_ACTIVE_ARCH = YES;
+@@ -335,7 +335,7 @@
+ 				ENABLE_STRICT_OBJC_MSGSEND = YES;
+ 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+ 				GCC_C_LANGUAGE_STANDARD = gnu17;
+-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
++				IPHONEOS_DEPLOYMENT_TARGET = 16.4;
+ 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+ 				MTL_ENABLE_DEBUG_INFO = NO;
+ 				SDKROOT = iphoneos;
+diff --git a/Cloudn/App/AppModel.swift b/Cloudn/App/AppModel.swift
+index dc96111..9d0a2ee 100644
+--- a/Cloudn/App/AppModel.swift
++++ b/Cloudn/App/AppModel.swift
+@@ -1,7 +1,7 @@
+ // Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
+ import CloudnKit
+ import Foundation
+-import Observation
++import Combine
+ import SwiftUI
+ import UIKit
+ 
+@@ -15,8 +15,7 @@ struct Toast: Identifiable, Equatable {
+ 
+ /// 全局状态与依赖装配（单例，手工注入到各页面）
+ @MainActor
+-@Observable
+-final class AppModel {
++final class AppModel: ObservableObject {
+     /// 系统可能在后台拉起应用投递下载事件（此时不创建界面），所以由 AppDelegate 与界面共用同一个实例
+     static let shared = AppModel()
+ 
+@@ -26,34 +25,35 @@ final class AppModel {
+     let downloads: DownloadStore
+     let uploads: UploadStore
+     let torrents: TorrentFetchStore
+-    @ObservationIgnored let resolvers: ShareResolvers
+-    @ObservationIgnored let videoService: VideoParseService
+-    @ObservationIgnored let background: BackgroundTransfers
++    let resolvers: ShareResolvers
++    let videoService: VideoParseService
++    let background: BackgroundTransfers
+ 
+-    var selectedTab: AppTab = .resolve
+-    var toast: Toast?
++    @Published var selectedTab: AppTab = .resolve
++    @Published var toast: Toast?
+     /// 当前页面底部浮动操作条的高度（按页面登记，取最高的）：轻提示抬到它上方，不盖住主按钮
+-    var toastLifts: [UUID: CGFloat] = [:]
++    @Published var toastLifts: [UUID: CGFloat] = [:]
+     /// 外部（URL Scheme / 分享）送进来的待解析文本
+-    var pendingInput: String?
++    @Published var pendingInput: String?
+     /// 外部打开 / 导入的种子文件（解析页接手）
+-    var pendingTorrent: TorrentTarget?
++    @Published var pendingTorrent: TorrentTarget?
+     /// 自动检查发现的新版本（弹窗提示）
+-    var availableUpdate: AppRelease?
++    @Published var availableUpdate: AppRelease?
+     /// 批量解析下载任务（合集 / 多链接）；离开页面也继续
+-    var batchJobs: [BatchJob] = []
++    @Published var batchJobs: [BatchJob] = []
++    let forwarders = CNCancelBag()
+ 
+-    @ObservationIgnored private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
++    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+     /// 后台时间快用完前提前暂停前台任务的计时
+-    @ObservationIgnored private var expiryWatch: Task<Void, Never>?
++    private var expiryWatch: Task<Void, Never>?
+     /// 挂起前被暂停的前台任务（m3u8 / 分轨），回到前台时继续
+-    @ObservationIgnored private var suspendedIds: [UUID] = []
++    private var suspendedIds: [UUID] = []
+     /// 已自动重新取过链的任务（每个任务只自动换一次，避免反复失败反复换）
+-    @ObservationIgnored private var autoRefreshed = Set<UUID>()
++    private var autoRefreshed = Set<UUID>()
+     /// 实况照片已下完、另一半还在下载的一半：等另一半下完一起存成实况照片、再一起移到外部文件夹
+-    @ObservationIgnored private var heldLiveHalves: [UUID: DownloadItem] = [:]
++    private var heldLiveHalves: [UUID: DownloadItem] = [:]
+     /// 已存成实况照片的配对（文件夹 + 图片名）：两半几乎同时下完时两边的回调都会去存，只存一次
+-    @ObservationIgnored private var savedLivePairs = Set<String>()
++    private var savedLivePairs = Set<String>()
+ 
+     init() {
+         let fm = FileManager.default
+@@ -97,6 +97,14 @@ final class AppModel {
+                                      extraTrackers: { [settings] in settings.useExtraTrackers ? TorrentDefaults.publicTrackers : [] })
+         background.reconcile()
+ 
++        // iOS 16：Observation 下子状态变更会自动通知界面；换成 ObservableObject 后手动把这些变更转发到 AppModel
++        settings.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &forwarders.items)
++        accounts.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &forwarders.items)
++        bookmarks.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &forwarders.items)
++        downloads.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &forwarders.items)
++        uploads.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &forwarders.items)
++        torrents.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &forwarders.items)
++
+         let resolvers = self.resolvers
+         let onFinished: @Sendable (DownloadItem) async -> Void = { [weak self] item in
+             // 夸克兜底转存产生的临时目录：下载完成后删除
+@@ -116,6 +124,11 @@ final class AppModel {
+         uploads.onMessage = { [weak self] message, isError in self?.show(message, error: isError) }
+     }
+ 
++    /// 把一个子对象（如批量任务）的变更转发到 AppModel，让观察 AppModel 的界面跟着刷新
++    func forwardChanges<O: ObservableObject>(of object: O) {
++        object.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &forwarders.items)
++    }
++
+     /// 下载失败：像是直链过期（403 / 404 / 410 / 412）且能重新取链的，自动换链继续一次；仍失败才通知
+     private func didFail(_ item: DownloadItem) async {
+         let message = item.errorMessage ?? ""
+@@ -355,7 +368,7 @@ final class AppModel {
+         guard downloads.activeCount > 0, backgroundTask == .invalid else { return }
+         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "downloads") { [weak self] in
+             // 必须在回调返回前结束后台任务，否则系统会直接杀掉应用；暂停落盘由下面提前开始的计时完成
+-            MainActor.assumeIsolated { self?.endBackgroundTask() }
++            cnAssumeMain { self?.endBackgroundTask() }
+         }
+         expiryWatch?.cancel()
+         expiryWatch = Task { [weak self] in
+diff --git a/Cloudn/App/CloudnApp.swift b/Cloudn/App/CloudnApp.swift
+index 58d5624..27721e0 100644
+--- a/Cloudn/App/CloudnApp.swift
++++ b/Cloudn/App/CloudnApp.swift
+@@ -4,7 +4,7 @@ import SwiftUI
+ @main
+ struct CloudnApp: App {
+     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+-    @State private var model = AppModel.shared
++    @StateObject private var model = AppModel.shared
+     @Environment(\.scenePhase) private var scenePhase
+ 
+     init() {
+@@ -27,20 +27,20 @@ struct CloudnApp: App {
+                 RootView()
+                 #endif
+             }
+-            .environment(model)
++            .environmentObject(model)
+             .onOpenURL { model.handle(url: $0) }
+             .preferredColorScheme(model.settings.appearance.colorScheme)
+             .tint(model.settings.accentColor)
+             .environment(\.accentTint, model.settings.accentUIColor)
+-        }
+-        .onChange(of: scenePhase) { _, phase in
+-            model.scenePhaseChanged(phase)
++            .cnOnChange(of: scenePhase) { _, phase in
++                model.scenePhaseChanged(phase)
++            }
+         }
+     }
+ }
+ 
+ struct RootView: View {
+-    @Environment(AppModel.self) private var model
++    @EnvironmentObject private var model: AppModel
+ 
+     var body: some View {
+         AppTabView { ResolveView() } me: { AccountsView() }
+@@ -64,10 +64,10 @@ struct RootView: View {
+ struct AppTabView<Resolve: View, Me: View>: View {
+     @ViewBuilder var resolve: Resolve
+     @ViewBuilder var me: Me
+-    @Environment(AppModel.self) private var model
++    @EnvironmentObject private var model: AppModel
+ 
+     var body: some View {
+-        let selection = Bindable(model).selectedTab
++        let selection = Binding(get: { model.selectedTab }, set: { model.selectedTab = $0 })
+         if #available(iOS 18.0, *) {
+             TabView(selection: selection) {
+                 Tab(value: AppTab.resolve) { resolve } label: { resolveLabel }
+diff --git a/Cloudn/App/ScreenshotMode.swift b/Cloudn/App/ScreenshotMode.swift
+index cdf5b27..68b5c37 100644
+--- a/Cloudn/App/ScreenshotMode.swift
++++ b/Cloudn/App/ScreenshotMode.swift
+@@ -718,7 +718,7 @@ struct DemoShareService: ShareResolver, ShareSaver, DriveManager {
+ /// 截图模式的根视图：与 RootView 相同的三个标签页，直接停在指定页面；不弹首次须知、更新提示
+ struct ScreenshotRootView: View {
+     let screen: ScreenshotMode.Screen
+-    @Environment(AppModel.self) private var model
++    @EnvironmentObject private var model: AppModel
+     @State private var previewing: Bool
+     @State private var shareModel: ShareBrowserModel?
+     @State private var saving: SaveItems?
+@@ -808,6 +808,7 @@ struct ScreenshotRootView: View {
+         case .batch:
+             let job = ScreenshotMode.makeBatch()
+             model.batchJobs.append(job)
++            model.forwardChanges(of: job)
+             batch = job
+         case .accountList:
+             listKind = .quark
+diff --git a/Cloudn/Compat/CNCompat.swift b/Cloudn/Compat/CNCompat.swift
+new file mode 100644
+index 0000000..0d99ffc
+--- /dev/null
++++ b/Cloudn/Compat/CNCompat.swift
+@@ -0,0 +1,183 @@
++// Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
++// iOS 16.4 兼容层（由 ios16 移植补丁加入；上游更新后由 scripts/port_ios16.py 自动重建）
++//
++// iOS 17 起 SwiftUI 才有的一批 API 在这里按同名语义给出 16.4 可用的实现，
++// 源码里对应用法在移植时统一改成 cn 前缀（见 scripts/port_ios16.py）。
++import SwiftUI
++import UIKit
++import Combine
++
++// MARK: - 触感反馈：替代 .sensoryFeedback(.selection/.success/…)
++enum CNHaptic: Equatable { case selection, success, warning, error, impact, increase, decrease }
++
++enum CNHaptics {
++    static func play(_ haptic: CNHaptic) {
++        switch haptic {
++        case .selection, .increase, .decrease:
++            UISelectionFeedbackGenerator().selectionChanged()
++        case .success:
++            UINotificationFeedbackGenerator().notificationOccurred(.success)
++        case .warning:
++            UINotificationFeedbackGenerator().notificationOccurred(.warning)
++        case .error:
++            UINotificationFeedbackGenerator().notificationOccurred(.error)
++        case .impact:
++            UIImpactFeedbackGenerator(style: .light).impactOccurred()
++        }
++    }
++}
++
++extension View {
++    func cnFeedback<V: Equatable>(_ haptic: CNHaptic, trigger: V) -> some View {
++        modifier(CNFeedbackModifier(haptic: haptic, trigger: trigger, condition: nil, dynamic: nil))
++    }
++    func cnFeedback<V: Equatable>(_ haptic: CNHaptic, trigger: V, condition: @escaping (V, V) -> Bool) -> some View {
++        modifier(CNFeedbackModifier(haptic: haptic, trigger: trigger, condition: condition, dynamic: nil))
++    }
++    func cnFeedback<V: Equatable>(trigger: V, _ feedback: @escaping (V, V) -> CNHaptic?) -> some View {
++        modifier(CNFeedbackModifier(haptic: .selection, trigger: trigger, condition: nil, dynamic: feedback))
++    }
++}
++
++private struct CNFeedbackModifier<V: Equatable>: ViewModifier {
++    let haptic: CNHaptic
++    let trigger: V
++    let condition: ((V, V) -> Bool)?
++    let dynamic: ((V, V) -> CNHaptic?)?
++    @State private var previous: V?
++
++    func body(content: Content) -> some View {
++        content
++            .onChange(of: trigger) { newValue in
++                let old = previous ?? newValue
++                if condition?(old, newValue) ?? true {
++                    CNHaptics.play(dynamic?(old, newValue) ?? haptic)
++                }
++                previous = newValue
++            }
++            .onAppear { if previous == nil { previous = trigger } }
++    }
++}
++
++// MARK: - 两参 onChange：iOS 17 的 .onChange(of:) { old, new in } 在 16 上不存在
++extension View {
++    func cnOnChange<V: Equatable>(of value: V, _ action: @escaping () -> Void) -> some View {
++        onChange(of: value) { _ in action() }
++    }
++    func cnOnChange<V: Equatable>(of value: V, _ action: @escaping (V) -> Void) -> some View {
++        onChange(of: value, perform: action)
++    }
++    func cnOnChange<V: Equatable>(of value: V, _ action: @escaping (V, V) -> Void) -> some View {
++        modifier(CNOnChange2(value: value, action: action))
++    }
++}
++
++private struct CNOnChange2<V: Equatable>: ViewModifier {
++    let value: V
++    let action: (V, V) -> Void
++    @State private var previous: V?
++
++    func body(content: Content) -> some View {
++        content
++            .onChange(of: value) { newValue in
++                action(previous ?? newValue, newValue)
++                previous = newValue
++            }
++            .onAppear { if previous == nil { previous = value } }
++    }
++}
++
++// MARK: - 滚动定位：iOS 17 的 scrollPosition / scrollTargetLayout 在 16 上降级为无操作
++extension View {
++    @ViewBuilder
++    func cnScrollTargetLayout() -> some View {
++        if #available(iOS 17.0, *) { self.scrollTargetLayout() } else { self }
++    }
++
++    @ViewBuilder
++    func cnScrollPosition(id: Binding<String?>, anchor: UnitPoint) -> some View {
++        if #available(iOS 17.0, *) { self.scrollPosition(id: id, anchor: anchor) } else { self }
++    }
++}
++
++// MARK: - 循环淡入（替代 .phaseAnimator）
++extension View {
++    @ViewBuilder
++    func cnPhasePulse() -> some View {
++        if #available(iOS 17.0, *) {
++            self.phaseAnimator([0.55, 1]) { view, phase in view.opacity(phase) }
++                animation: { _ in .easeInOut(duration: 0.9) }
++        } else {
++            self.modifier(CNPulse())
++        }
++    }
++}
++
++private struct CNPulse: ViewModifier {
++    @State private var dim = false
++    func body(content: Content) -> some View {
++        content
++            .opacity(dim ? 0.55 : 1)
++            .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: dim)
++            .onAppear { dim = true }
++    }
++}
++
++// MARK: - 基于值的导航目标（替代 .navigationDestination(item:)）
++extension View {
++    func cnNavigationDestination<Item: Hashable, Destination: View>(
++        item: Binding<Item?>,
++        @ViewBuilder destination: @escaping (Item) -> Destination
++    ) -> some View {
++        modifier(CNNavigationDestination(item: item, destination: destination))
++    }
++}
++
++private struct CNNavigationDestination<Item: Hashable, Destination: View>: ViewModifier {
++    @Binding var item: Item?
++    let destination: (Item) -> Destination
++
++    func body(content: Content) -> some View {
++        content.navigationDestination(
++            isPresented: Binding(get: { item != nil }, set: { if !$0 { item = nil } })
++        ) {
++            Group { if let item { destination(item) } }
++        }
++    }
++}
++
++// MARK: - @Bindable 的 16.4 替代（对 ObservableObject 取 Binding）
++@propertyWrapper
++struct CNBindable<T: ObservableObject> {
++    var wrappedValue: T
++    init(wrappedValue: T) { self.wrappedValue = wrappedValue }
++    var projectedValue: Wrapper { Wrapper(base: wrappedValue) }
++
++    @dynamicMemberLookup
++    struct Wrapper {
++        let base: T
++        subscript<V>(dynamicMember keyPath: ReferenceWritableKeyPath<T, V>) -> Binding<V> {
++            Binding(get: { base[keyPath: keyPath] }, set: { base[keyPath: keyPath] = $0 })
++        }
++    }
++}
++
++// MARK: - 动画：iOS 17 的 .snappy / .spring(duration:) 在 16 上换成等价曲线
++extension Animation {
++    static var cnSnappy: Animation { .easeOut(duration: 0.28) }
++    static func cnSnappy(duration: Double) -> Animation { .easeOut(duration: duration) }
++    static func cnSpring(duration: Double) -> Animation { .spring(response: duration, dampingFraction: 0.85, blendDuration: 0) }
++}
++
++// MARK: - MainActor.assumeIsolated(iOS 17) 替代：调用点已保证在主线程
++@inline(__always)
++func cnAssumeMain<T>(_ body: @MainActor () -> T) -> T {
++    let raw = unsafeBitCast(body, to: (() -> T).self)
++    return raw()
++}
++
++// MARK: - 变更转发的取消袋（AppModel 用来把子状态变更转发到自己身上）
++final class CNCancelBag {
++    var items = Set<AnyCancellable>()
++    func add(_ cancellable: AnyCancellable) { items.insert(cancellable) }
++}
+diff --git a/Cloudn/Services/AccountStore.swift b/Cloudn/Services/AccountStore.swift
+index d0fb1be..a3a697b 100644
+--- a/Cloudn/Services/AccountStore.swift
++++ b/Cloudn/Services/AccountStore.swift
+@@ -1,7 +1,7 @@
+ // Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
+ import CloudnKit
+ import Foundation
+-import Observation
++import Combine
+ 
+ struct Account: Codable, Equatable {
+     var cookie: String
+@@ -134,20 +134,19 @@ actor AccountVault: CredentialStore {
+ 
+ /// 界面侧的账号状态镜像
+ @MainActor
+-@Observable
+-final class AccountStore {
++final class AccountStore: ObservableObject {
+     /// 各平台主账号
+-    private(set) var accounts: [AccountKind: Account] = [:]
++    @Published private(set) var accounts: [AccountKind: Account] = [:]
+     /// 各平台附加账号
+-    private(set) var extras: [AccountKind: [Account]] = [:]
+-    @ObservationIgnored private(set) var vault: AccountVault!
++    @Published private(set) var extras: [AccountKind: [Account]] = [:]
++    private(set) var vault: AccountVault!
+     /// 正在为该平台「添加账号」：接下来这次登录作为附加账号保存。
+     /// 登录成功时清除；登录页没登成就关掉时由「我的」页清除（sheet 的 onDismiss）
+-    @ObservationIgnored var pendingAdd: AccountKind?
++    var pendingAdd: AccountKind?
+     /// 主账号的登录态检测结果；存进 UserDefaults，重启后不必重测
+-    private(set) var health: [AccountKind: HealthRecord] = AccountStore.loadHealth()
++    @Published private(set) var health: [AccountKind: HealthRecord] = AccountStore.loadHealth()
+     /// 正在检测的平台
+-    private(set) var checking = Set<AccountKind>()
++    @Published private(set) var checking = Set<AccountKind>()
+ 
+     init() {
+         vault = AccountVault { [weak self] in
+diff --git a/Cloudn/Services/AppSettings.swift b/Cloudn/Services/AppSettings.swift
+index aa11d4b..9f87d88 100644
+--- a/Cloudn/Services/AppSettings.swift
++++ b/Cloudn/Services/AppSettings.swift
+@@ -1,142 +1,141 @@
+ // Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
+ import CloudnKit
+ import Foundation
+-import Observation
++import Combine
+ import SwiftUI
+ import UIKit
+ 
+ /// 全部偏好设置的唯一入口（UserDefaults），值域在 setter 里兜住
+ @MainActor
+-@Observable
+-final class AppSettings {
++final class AppSettings: ObservableObject {
+     private let defaults = UserDefaults.standard
+ 
+-    var maxConcurrentTasks: Int {
++    @Published var maxConcurrentTasks: Int {
+         didSet { defaults.set(maxConcurrentTasks, forKey: "maxConcurrentTasks"); publish() }
+     }
+-    var retryCount: Int {
++    @Published var retryCount: Int {
+         didSet { defaults.set(retryCount, forKey: "retryCount"); publish() }
+     }
+     /// 全局限速（KB/s），0 表示不限
+-    var speedLimitKB: Int {
++    @Published var speedLimitKB: Int {
+         didSet { defaults.set(speedLimitKB, forKey: "speedLimitKB"); publish() }
+     }
+     /// 按平台覆盖单任务连接数（键为平台显示名）
+-    var connectionsBySource: [String: Int] {
++    @Published var connectionsBySource: [String: Int] {
+         didSet { defaults.set(connectionsBySource, forKey: "connectionsBySource"); publish() }
+     }
+     /// 免转存下载（夸克 / UC 先直接取链，失败再临时转存）
+-    var directFirst: Bool {
++    @Published var directFirst: Bool {
+         didSet { defaults.set(directFirst, forKey: "directFirst"); resolverOptions.directFirst = directFirst }
+     }
+     /// 完成后移动到的文件夹（安全作用域书签）；nil 表示留在应用的下载目录。只经 setExportFolder 修改
+-    private(set) var exportFolderBookmark: Data? {
++    @Published private(set) var exportFolderBookmark: Data? {
+         didSet { defaults.set(exportFolderBookmark, forKey: "exportFolderBookmark") }
+     }
+     /// 书签解析出的文件夹：启动和更换文件夹时各解析一次，界面读取不碰磁盘、不改状态
+-    private(set) var exportFolder: URL? = nil
++    @Published private(set) var exportFolder: URL? = nil
+     /// 当前持有安全访问的文件夹（与 exportFolder 同一个；start / stop 成对，见 resolveExportFolder）
+-    @ObservationIgnored private var exportFolderAccess: URL?
+-    var clipboardHint: Bool {
++    private var exportFolderAccess: URL?
++    @Published var clipboardHint: Bool {
+         didSet { defaults.set(clipboardHint, forKey: "clipboardHint") }
+     }
+     /// 视频/图片下载完成后自动存入相册
+-    var autoSaveToPhotos: Bool {
++    @Published var autoSaveToPhotos: Bool {
+         didSet { defaults.set(autoSaveToPhotos, forKey: "autoSaveToPhotos") }
+     }
+     /// 锁屏与灵动岛显示下载进度（实时活动）
+-    var liveActivity: Bool {
++    @Published var liveActivity: Bool {
+         didSet { defaults.set(liveActivity, forKey: "liveActivity") }
+     }
+     /// 应用不在前台时，下载完成 / 失败发本地通知
+-    var notifyOnFinish: Bool {
++    @Published var notifyOnFinish: Bool {
+         didSet {
+             defaults.set(notifyOnFinish, forKey: "notifyOnFinish")
+             if notifyOnFinish && !oldValue { Notifier.requestAuthorizationIfNeeded() }
+         }
+     }
+     /// BT 下载附加内置的公共 tracker（磁力链接自带的 tracker 常已失效）
+-    var useExtraTrackers: Bool {
++    @Published var useExtraTrackers: Bool {
+         didSet { defaults.set(useExtraTrackers, forKey: "useExtraTrackers"); publish() }
+     }
+     /// 多账号下载：批量下载时按文件轮换使用同平台的多个账号
+-    var multiAccountDownload: Bool {
++    @Published var multiAccountDownload: Bool {
+         didSet { defaults.set(multiAccountDownload, forKey: "multiAccountDownload") }
+     }
+     /// 抖音作品文件按「昵称_抖音号_发布时间」命名（默认按标题）
+-    var authorStyledNames: Bool {
++    @Published var authorStyledNames: Bool {
+         didSet { defaults.set(authorStyledNames, forKey: Self.authorStyledNamesKey) }
+     }
+     static let authorStyledNamesKey = "authorStyledNames"
+     /// 允许把夸克 / UC 中文口令发给第三方「星海」服务解析（唯一用到第三方服务的地方；首次使用时询问）
+-    var allowCommandService: Bool {
++    @Published var allowCommandService: Bool {
+         didSet { defaults.set(allowCommandService, forKey: "allowCommandService") }
+     }
+     /// 单文件多源分片：大文件同时用多个账号各自取到的直链分摊分片（依赖多账号下载）
+-    var multiSourceDownload: Bool {
++    @Published var multiSourceDownload: Bool {
+         didSet { defaults.set(multiSourceDownload, forKey: "multiSourceDownload") }
+     }
+     /// GitHub 下载镜像前缀（空串表示直连 GitHub）
+-    var githubMirror: String {
++    @Published var githubMirror: String {
+         didSet { defaults.set(githubMirror, forKey: "githubMirror") }
+     }
+     /// GitHub Token（存钥匙串；只用于提高接口限额 / 访问自己的私有仓库）
+-    var githubToken: String {
++    @Published var githubToken: String {
+         didSet {
+             if githubToken.isEmpty { Keychain.delete("github.token") } else { Keychain.write("github.token", Data(githubToken.utf8)) }
+         }
+     }
+     /// 主题色（十六进制 RRGGBB，空串为默认蓝）
+-    var accentHex: String {
++    @Published var accentHex: String {
+         didSet { defaults.set(accentHex, forKey: "accentHex") }
+     }
+     /// 外观：跟随系统 / 浅色 / 深色
+-    var appearance: Appearance {
++    @Published var appearance: Appearance {
+         didSet { defaults.set(appearance.rawValue, forKey: "appearance") }
+     }
+     /// 平台图标：线性（默认）/ 实心。组件直接用 @AppStorage 读同一个键，改了即时生效
+-    var platformIconStyle: PlatformIconStyle {
++    @Published var platformIconStyle: PlatformIconStyle {
+         didSet { defaults.set(platformIconStyle.rawValue, forKey: PlatformIconStyle.key) }
+     }
+     /// 「我的」页不显示的网盘（AccountKind.rawValue）；隐藏只影响展示，解析、下载照常
+-    var hiddenDrives: [String] {
++    @Published var hiddenDrives: [String] {
+         didSet { defaults.set(hiddenDrives, forKey: "hiddenDrives") }
+     }
+     /// 启动时自动检查更新（每天最多一次）
+-    var autoCheckUpdates: Bool {
++    @Published var autoCheckUpdates: Bool {
+         didSet { defaults.set(autoCheckUpdates, forKey: "autoCheckUpdates") }
+     }
+     /// 检查更新时包含预发布版（测试版）
+-    var acceptPrerelease: Bool {
++    @Published var acceptPrerelease: Bool {
+         didSet { defaults.set(acceptPrerelease, forKey: "acceptPrerelease"); lastUpdateCheck = nil }
+     }
+-    var lastUpdateCheck: Date? {
++    @Published var lastUpdateCheck: Date? {
+         didSet { defaults.set(lastUpdateCheck, forKey: "lastUpdateCheck") }
+     }
+     /// 用户选择忽略的版本（自动检查不再提示）
+-    var skippedVersion: String {
++    @Published var skippedVersion: String {
+         didSet { defaults.set(skippedVersion, forKey: "skippedVersion") }
+     }
+-    var acceptedNotice: Bool {
++    @Published var acceptedNotice: Bool {
+         didSet { defaults.set(acceptedNotice, forKey: "acceptedNotice") }
+     }
+     /// 应用内网络代理；关闭时跟随系统（含 VPN）
+-    var proxyEnabled: Bool {
++    @Published var proxyEnabled: Bool {
+         didSet { defaults.set(proxyEnabled, forKey: "proxyEnabled"); applyProxy() }
+     }
+-    var proxyKind: NetworkProxy.Kind {
++    @Published var proxyKind: NetworkProxy.Kind {
+         didSet { defaults.set(proxyKind.rawValue, forKey: "proxyKind"); applyProxy() }
+     }
+-    var proxyHost: String {
++    @Published var proxyHost: String {
+         didSet { defaults.set(proxyHost, forKey: "proxyHost"); applyProxy() }
+     }
+-    var proxyPort: Int {
++    @Published var proxyPort: Int {
+         didSet { defaults.set(proxyPort, forKey: "proxyPort"); applyProxy() }
+     }
+ 
+     /// 下载引擎在后台线程读取，这里维护一份线程安全快照
+-    @ObservationIgnored let snapshot = SettingsSnapshot()
+-    @ObservationIgnored let resolverOptions = ResolverOptions()
++    let snapshot = SettingsSnapshot()
++    let resolverOptions = ResolverOptions()
+ 
+     init() {
+         defaults.register(defaults: [
+diff --git a/Cloudn/Services/BatchJob.swift b/Cloudn/Services/BatchJob.swift
+index cacc502..22f9bc5 100644
+--- a/Cloudn/Services/BatchJob.swift
++++ b/Cloudn/Services/BatchJob.swift
+@@ -1,14 +1,13 @@
+ // Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
+ import CloudnKit
+ import Foundation
+-import Observation
++import Combine
+ 
+ /// 批量解析下载：合集 / 播放列表的各条，或一次粘贴的多个链接。
+ /// 逐条解析（间隔一小会儿，避免触发平台风控），每条按默认选择（最高画质）加入下载，归到同一个下载分组。
+ /// 由 AppModel 持有：离开页面也会继续
+ @MainActor
+-@Observable
+-final class BatchJob: Identifiable {
++final class BatchJob: Identifiable, ObservableObject {
+     enum State: Equatable {
+         case waiting, parsing
+         /// 已加入下载的文件数
+@@ -25,13 +24,13 @@ final class BatchJob: Identifiable {
+ 
+     let id = UUID()
+     let title: String
+-    private(set) var items: [Item]
+-    private(set) var running = false
+-    @ObservationIgnored private var task: Task<Void, Never>?
++    @Published private(set) var items: [Item]
++    @Published private(set) var running = false
++    private var task: Task<Void, Never>?
+     /// 每次开始 / 停止加一：停止后旧的那一轮可能还在收尾（等网络请求返回），它看到编号变了就不再改动状态，
+     /// 「停止」后马上「继续」也不会出现两轮同时跑
+-    @ObservationIgnored private var runToken = 0
+-    @ObservationIgnored private let group: DownloadGroup
++    private var runToken = 0
++    private let group: DownloadGroup
+ 
+     init(title: String, entries: [(title: String, url: String)]) {
+         self.title = title
+@@ -137,6 +136,7 @@ extension AppModel {
+     func startBatch(title: String, entries: [(title: String, url: String)]) -> BatchJob {
+         let job = BatchJob(title: title, entries: entries)
+         batchJobs.append(job)
++        forwardChanges(of: job)
+         job.start(app: self)
+         show("开始批量解析 \(entries.count) 个")
+         return job
+diff --git a/Cloudn/Services/BookmarkStore.swift b/Cloudn/Services/BookmarkStore.swift
+index b858382..c25cc33 100644
+--- a/Cloudn/Services/BookmarkStore.swift
++++ b/Cloudn/Services/BookmarkStore.swift
+@@ -1,6 +1,6 @@
+ // Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
+ import Foundation
+-import Observation
++import Combine
+ 
+ struct Bookmark: Codable, Identifiable, Hashable {
+     var id = UUID()
+@@ -12,12 +12,11 @@ struct Bookmark: Codable, Identifiable, Hashable {
+ 
+ /// 收藏的链接与最近解析记录（JSON 文件）
+ @MainActor
+-@Observable
+-final class BookmarkStore {
+-    private(set) var bookmarks: [Bookmark] = []
+-    private(set) var history: [Bookmark] = []
+-    @ObservationIgnored private let fileURL: URL
+-    @ObservationIgnored private let historyURL: URL
++final class BookmarkStore: ObservableObject {
++    @Published private(set) var bookmarks: [Bookmark] = []
++    @Published private(set) var history: [Bookmark] = []
++    private let fileURL: URL
++    private let historyURL: URL
+ 
+     init(directory: URL) {
+         fileURL = directory.appendingPathComponent("bookmarks.json")
+diff --git a/Cloudn/Services/DownloadStore.swift b/Cloudn/Services/DownloadStore.swift
+index 15f7c78..408a73e 100644
+--- a/Cloudn/Services/DownloadStore.swift
++++ b/Cloudn/Services/DownloadStore.swift
+@@ -1,7 +1,7 @@
+ // Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
+ import CloudnKit
+ import Foundation
+-import Observation
++import Combine
+ 
+ /// 某个分享的下载情况
+ struct ShareDownloadProgress: Equatable {
+@@ -13,26 +13,25 @@ struct ShareDownloadProgress: Equatable {
+ /// 引擎每 0.5 秒推一次完整列表；只有真正需要进度的视图读 `items` / `shareFiles`，
+ /// 角标、解析页最近记录读的是只在数量变化时才更新的派生值，不会跟着进度一起重绘
+ @MainActor
+-@Observable
+-final class DownloadStore {
+-    private(set) var items: [DownloadItem] = []
++final class DownloadStore: ObservableObject {
++    @Published private(set) var items: [DownloadItem] = []
+     /// 进行中的任务数（标签角标）
+-    private(set) var activeCount = 0
++    @Published private(set) var activeCount = 0
+     /// 「平台|分享 ID」→ 已完成 / 总数（解析页最近记录）
+-    private(set) var shareProgress: [String: ShareDownloadProgress] = [:]
++    @Published private(set) var shareProgress: [String: ShareDownloadProgress] = [:]
+     /// 分享链接 → 文件 ID → 该文件最近一次的下载任务（分享页行尾状态）
+-    private(set) var shareFiles: [String: [String: DownloadItem]] = [:]
++    @Published private(set) var shareFiles: [String: [String: DownloadItem]] = [:]
+     /// 分享链接 → 分享 ID 的解析缓存（链接解析是一串正则，不能每次进度刷新都跑）
+-    @ObservationIgnored private var shareIdCache: [String: String] = [:]
++    private var shareIdCache: [String: String] = [:]
+     /// 已收到过引擎的列表
+-    @ObservationIgnored private var received = false
+-    @ObservationIgnored let engine: DownloadEngine
+-    @ObservationIgnored private let resolvers: ShareResolvers
+-    @ObservationIgnored private let videoService: VideoParseService
+-    @ObservationIgnored private let background: BackgroundTransfers
+-    @ObservationIgnored private let activity = DownloadActivity()
++    private var received = false
++    let engine: DownloadEngine
++    private let resolvers: ShareResolvers
++    private let videoService: VideoParseService
++    private let background: BackgroundTransfers
++    private let activity = DownloadActivity()
+     /// 已移到外部文件夹的文件的位置（由 AppModel 提供，依赖设置里的文件夹书签）
+-    @ObservationIgnored var exportedURL: ((DownloadItem) -> URL?)?
++    var exportedURL: ((DownloadItem) -> URL?)?
+ 
+     init(engine: DownloadEngine, resolvers: ShareResolvers, videoService: VideoParseService, background: BackgroundTransfers) {
+         self.engine = engine
+diff --git a/Cloudn/Services/Notifier.swift b/Cloudn/Services/Notifier.swift
+index 94e1aa1..99f26d9 100644
+--- a/Cloudn/Services/Notifier.swift
++++ b/Cloudn/Services/Notifier.swift
+@@ -91,7 +91,7 @@ extension AppDelegate {
+         let isDownload = response.notification.request.content.threadIdentifier == Notifier.threadIdentifier
+         DispatchQueue.main.async {
+             if isDownload {
+-                MainActor.assumeIsolated { AppModel.shared.selectedTab = .downloads }
++                cnAssumeMain { AppModel.shared.selectedTab = .downloads }
+             }
+             completionHandler()
+         }
+diff --git a/Cloudn/Services/QuickActions.swift b/Cloudn/Services/QuickActions.swift
+index 543bd2a..91046a8 100644
+--- a/Cloudn/Services/QuickActions.swift
++++ b/Cloudn/Services/QuickActions.swift
+@@ -63,6 +63,6 @@ enum QuickActions {
+ final class QuickActionSceneDelegate: NSObject, UIWindowSceneDelegate {
+     func windowScene(_ windowScene: UIWindowScene, performActionFor shortcutItem: UIApplicationShortcutItem,
+                      completionHandler: @escaping (Bool) -> Void) {
+-        completionHandler(MainActor.assumeIsolated { QuickActions.perform(shortcutItem, model: AppModel.shared) })
++        completionHandler(cnAssumeMain { QuickActions.perform(shortcutItem, model: AppModel.shared) })
+     }
+ }
+diff --git a/Cloudn/Services/TorrentFetchStore.swift b/Cloudn/Services/TorrentFetchStore.swift
+index cb00da6..bd0ad05 100644
+--- a/Cloudn/Services/TorrentFetchStore.swift
++++ b/Cloudn/Services/TorrentFetchStore.swift
+@@ -1,12 +1,11 @@
+ // Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
+ import CloudnKit
+ import Foundation
+-import Observation
++import Combine
+ 
+ /// 磁力链接的种子信息获取放在应用层：离开种子页不会中断，回来时接着看同一次查找的进度与结果
+ @MainActor
+-@Observable
+-final class TorrentFetchStore {
++final class TorrentFetchStore: ObservableObject {
+     struct Status: Equatable {
+         var connected = 0
+         var known = 0
+@@ -20,12 +19,12 @@ final class TorrentFetchStore {
+         }
+     }
+ 
+-    private(set) var statuses: [String: Status] = [:]
+-    @ObservationIgnored private var tasks: [String: Task<Void, Never>] = [:]
++    @Published private(set) var statuses: [String: Status] = [:]
++    private var tasks: [String: Task<Void, Never>] = [:]
+     /// 每次开始的编号：被取消的旧查找收尾时据此认出自己已不是当前那次
+-    @ObservationIgnored private var tokens: [String: UUID] = [:]
+-    @ObservationIgnored private let cacheDirectory: URL
+-    @ObservationIgnored private let extraTrackers: () -> [String]
++    private var tokens: [String: UUID] = [:]
++    private let cacheDirectory: URL
++    private let extraTrackers: () -> [String]
+ 
+     init(cacheDirectory: URL, extraTrackers: @escaping () -> [String]) {
+         self.cacheDirectory = cacheDirectory
+diff --git a/Cloudn/Services/UploadStore.swift b/Cloudn/Services/UploadStore.swift
+index 9c32376..ae642ad 100644
+--- a/Cloudn/Services/UploadStore.swift
++++ b/Cloudn/Services/UploadStore.swift
+@@ -1,13 +1,12 @@
+ // Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
+ import CloudnKit
+ import Foundation
+-import Observation
++import Combine
+ import UIKit
+ 
+ /// 上传队列：一次传一个（各网盘对并发上传都很敏感），离开页面也继续；切到后台借一段执行时间
+ @MainActor
+-@Observable
+-final class UploadStore {
++final class UploadStore: ObservableObject {
+     struct Item: Identifiable, Equatable {
+         enum Status: Equatable { case waiting, running, done, failed(String), cancelled }
+ 
+@@ -28,17 +27,17 @@ final class UploadStore {
+         var isActive: Bool { status == .waiting || status == .running }
+     }
+ 
+-    private(set) var items: [Item] = []
++    @Published private(set) var items: [Item] = []
+     /// 每完成一个就加一，「我的网盘」页据此刷新
+-    private(set) var finishedRevision = 0
++    @Published private(set) var finishedRevision = 0
+ 
+-    @ObservationIgnored private let resolvers: ShareResolvers
+-    @ObservationIgnored private var worker: Task<Void, Never>?
+-    @ObservationIgnored private var current: Task<Void, Error>?
+-    @ObservationIgnored private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+-    @ObservationIgnored var onMessage: ((String, Bool) -> Void)?
++    private let resolvers: ShareResolvers
++    private var worker: Task<Void, Never>?
++    private var current: Task<Void, Error>?
++    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
++    var onMessage: ((String, Bool) -> Void)?
+     /// 这一批已传完的文件名：队列全部结束时合并成一条提示，不逐个弹
+-    @ObservationIgnored private var uploadedNames: [String] = []
++    private var uploadedNames: [String] = []
+ 
+     init(resolvers: ShareResolvers) { self.resolvers = resolvers }
+ 
+@@ -189,7 +188,7 @@ final class UploadStore {
+         // 到期回调在主线程上同步调用，必须在它返回前结束后台任务，否则系统会直接杀掉应用；
+         // 绕一道 Task 是异步的，来不及
+         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "uploads") { [weak self] in
+-            MainActor.assumeIsolated { self?.endBackgroundTask() }
++            cnAssumeMain { self?.endBackgroundTask() }
+         }
+     }
+ 
+diff --git a/Cloudn/Views/Accounts/AccountListView.swift b/Cloudn/Views/Accounts/AccountListView.swift
+index d9e6131..8e99ff9 100644
+--- a/Cloudn/Views/Accounts/AccountListView.swift
++++ b/Cloudn/Views/Accounts/AccountListView.swift
+@@ -6,7 +6,7 @@ import SwiftUI
+ struct AccountListView: View {
+     let kind: AccountKind
+     let onAdd: (AccountKind) -> Void
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+     @State private var removing: Int?
+ 
+diff --git a/Cloudn/Views/Accounts/AccountsView.swift b/Cloudn/Views/Accounts/AccountsView.swift
+index 5ef19e0..efdcdfe 100644
+--- a/Cloudn/Views/Accounts/AccountsView.swift
++++ b/Cloudn/Views/Accounts/AccountsView.swift
+@@ -3,7 +3,7 @@ import CloudnKit
+ import SwiftUI
+ 
+ struct AccountsView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @State private var loginKind: AccountKind?
+     @State private var manualKind: AccountKind?
+     @State private var passwordKind: AccountKind?
+@@ -69,7 +69,7 @@ struct AccountsView: View {
+                             ForEach(shownDrives) { driveTile($0) }
+                             moreTile(hidden: allDrives.count - shownDrives.count)
+                         }
+-                        .animation(.snappy, value: shownDrives)
++                        .animation(.cnSnappy, value: shownDrives)
+                     }
+                     VStack(alignment: .leading, spacing: 10) {
+                         let loggedVideos = videoKinds.filter(hasAccount).count
+@@ -82,7 +82,7 @@ struct AccountsView: View {
+                             moreVideosRow(hidden: videoKinds.count - shownVideos.count)
+                         }
+                         .card()
+-                        .animation(.snappy, value: shownVideos)
++                        .animation(.cnSnappy, value: shownVideos)
+                     }
+                     VStack(spacing: 0) {
+                         NavigationLink { SettingsView() } label: { linkRow(.gear, "设置") }
+@@ -108,7 +108,7 @@ struct AccountsView: View {
+                 .readableWidth()
+             }
+             .background(Color.paper)
+-            .onChange(of: loggedKinds) { old, new in
++            .cnOnChange(of: loggedKinds) { old, new in
+                 // 自定义过显示哪些：新登录的平台自动显示，免得登录完找不到
+                 let added = new.subtracting(old)
+                 guard !added.isEmpty else { return }
+@@ -151,7 +151,7 @@ struct AccountsView: View {
+             .sheet(item: $passwordKind, onDismiss: clearPendingAdd) { kind in
+                 PasswordLoginView(kind: kind)
+             }
+-            .navigationDestination(item: $drivePlatform) { MyDriveView(platform: $0) }
++            .cnNavigationDestination(item: $drivePlatform) { MyDriveView(platform: $0) }
+             // 同一时刻只能展示一个 sheet：列表完全收起后再弹登录页（固定延时在慢设备上会赶在收起之前，登录页弹不出来）
+             .sheet(item: $listKind, onDismiss: {
+                 guard let add = addAfterList else { return }
+@@ -203,7 +203,7 @@ struct AccountsView: View {
+                             .font(.figuresSmall).foregroundStyle(Color.ink3).lineLimit(1).minimumScaleFactor(0.8)
+                             .contentTransition(.numericText())
+                     }
+-                    .animation(.snappy, value: quota)
++                    .animation(.cnSnappy, value: quota)
+                 } else {
+                     Text(account == nil ? "点按登录" : " ").font(.caption).foregroundStyle(Color.ink3)
+                 }
+@@ -475,7 +475,7 @@ struct LoginSheet: View {
+ private struct LogoutDialog: ViewModifier {
+     let kind: AccountKind
+     @Binding var logoutKind: AccountKind?
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+ 
+     func body(content: Content) -> some View {
+         // 退出会删掉该平台的全部账号（含附加账号），有多个时把数量说清楚
+@@ -490,7 +490,7 @@ private struct LogoutDialog: ViewModifier {
+ /// 手动粘贴 Cookie（网页登录走不通时的兜底）
+ struct ManualCookieView: View {
+     let kind: AccountKind
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+     @State private var cookie = ""
+     @State private var saving = false
+diff --git a/Cloudn/Views/Accounts/AuthBackupView.swift b/Cloudn/Views/Accounts/AuthBackupView.swift
+index 07e804d..f2a6eed 100644
+--- a/Cloudn/Views/Accounts/AuthBackupView.swift
++++ b/Cloudn/Views/Accounts/AuthBackupView.swift
+@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
+ 
+ /// 导出：设置口令 → 生成加密备份文件 → 分享 / 存到「文件」
+ struct AuthExportView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+     @State private var passphrase = ""
+     @State private var confirm = ""
+@@ -67,8 +67,8 @@ struct AuthExportView: View {
+             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
+         }
+         // 改了任一口令，之前生成的文件就不再对应当前口令：作废并删掉，要重新生成
+-        .onChange(of: passphrase) { discardFile() }
+-        .onChange(of: confirm) { discardFile() }
++        .cnOnChange(of: passphrase) { discardFile() }
++        .cnOnChange(of: confirm) { discardFile() }
+         // 临时目录里的备份文件不留在本机
+         .onDisappear { discardFile() }
+     }
+@@ -106,7 +106,7 @@ struct AuthExportView: View {
+ /// 导入：选文件 → 输入口令 → 解密并覆盖同平台账号
+ struct AuthImportView: View {
+     let data: Data
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+     @State private var passphrase = ""
+     @State private var error: String?
+diff --git a/Cloudn/Views/Accounts/OAuthLoginView.swift b/Cloudn/Views/Accounts/OAuthLoginView.swift
+index 6bed14f..749c905 100644
+--- a/Cloudn/Views/Accounts/OAuthLoginView.swift
++++ b/Cloudn/Views/Accounts/OAuthLoginView.swift
+@@ -8,7 +8,7 @@ import SwiftUI
+ struct OAuthLoginView: View {
+     let kind: AccountKind
+     let provider: OAuthProvider
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+     @State private var working = false
+     @State private var errorText: String?
+diff --git a/Cloudn/Views/Accounts/PasswordLoginView.swift b/Cloudn/Views/Accounts/PasswordLoginView.swift
+index cc9fe5d..0233dae 100644
+--- a/Cloudn/Views/Accounts/PasswordLoginView.swift
++++ b/Cloudn/Views/Accounts/PasswordLoginView.swift
+@@ -5,7 +5,7 @@ import SwiftUI
+ /// 应用内账号密码 / 短信验证码登录（光鸭、迅雷、123、蓝奏云、蓝奏优享）
+ struct PasswordLoginView: View {
+     let kind: AccountKind
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+ 
+     enum Mode: String, CaseIterable, Identifiable {
+@@ -122,7 +122,7 @@ struct PasswordLoginView: View {
+                 }
+             }
+             // 换了登录方式，上一种方式的错误提示不再相关
+-            .onChange(of: mode) { error = nil }
++            .cnOnChange(of: mode) { error = nil }
+             .task(id: countdown > 0) {
+                 while countdown > 0 {
+                     try? await Task.sleep(nanoseconds: 1_000_000_000)
+diff --git a/Cloudn/Views/Accounts/PlatformLayoutView.swift b/Cloudn/Views/Accounts/PlatformLayoutView.swift
+index 6db4e3a..1e3c6ea 100644
+--- a/Cloudn/Views/Accounts/PlatformLayoutView.swift
++++ b/Cloudn/Views/Accounts/PlatformLayoutView.swift
+@@ -31,7 +31,7 @@ enum PlatformLayout {
+ 
+ /// 排序与显示：系统列表的拖动把手排序（拖到边缘会自动滚动），开关决定是否在「我的」页显示
+ struct PlatformLayoutView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+     @State private var group: PlatformLayout.Group
+     @State private var drives: [AccountKind] = []
+@@ -74,7 +74,7 @@ struct PlatformLayoutView: View {
+             }
+             .environment(\.editMode, .constant(.active))
+             .paperList()
+-            .animation(.snappy, value: group)
++            .animation(.cnSnappy, value: group)
+             .safeAreaInset(edge: .top, spacing: 0) {
+                 Picker("类别", selection: $group) {
+                     ForEach(PlatformLayout.Group.allCases) { Text($0.rawValue).tag($0) }
+@@ -100,11 +100,11 @@ struct PlatformLayoutView: View {
+                 }
+                 ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
+             }
+-            .sensoryFeedback(.selection, trigger: pinned)
++            .cnFeedback(.selection, trigger: pinned)
+             .onAppear(perform: load)
+-            .onChange(of: drives) { save() }
+-            .onChange(of: videos) { save() }
+-            .onChange(of: pinned) { save() }
++            .cnOnChange(of: drives) { save() }
++            .cnOnChange(of: videos) { save() }
++            .cnOnChange(of: pinned) { save() }
+         }
+     }
+ 
+@@ -132,7 +132,7 @@ struct PlatformLayoutView: View {
+             Toggle("在「我的」页显示\(kind.displayName)", isOn: Binding(
+                 get: { on },
+                 set: { show in
+-                    withAnimation(.snappy) { if show { pinned.insert(kind) } else { pinned.remove(kind) } }
++                    withAnimation(.cnSnappy) { if show { pinned.insert(kind) } else { pinned.remove(kind) } }
+                 }))
+                 .labelsHidden()
+         }
+@@ -165,13 +165,13 @@ struct PlatformLayoutView: View {
+     }
+ 
+     private func setAll(_ show: Bool) {
+-        withAnimation(.snappy) {
++        withAnimation(.cnSnappy) {
+             for kind in items.wrappedValue { if show { pinned.insert(kind) } else { pinned.remove(kind) } }
+         }
+     }
+ 
+     private func setLoggedInOnly() {
+-        withAnimation(.snappy) {
++        withAnimation(.cnSnappy) {
+             for kind in items.wrappedValue {
+                 if app.accounts.accounts[kind] != nil { pinned.insert(kind) } else { pinned.remove(kind) }
+             }
+@@ -179,7 +179,7 @@ struct PlatformLayoutView: View {
+     }
+ 
+     private func resetOrder() {
+-        withAnimation(.snappy) {
++        withAnimation(.cnSnappy) {
+             if group == .drives { drives = AccountKind.allCases.filter(\.isDrive) } else { videos = AccountKind.allCases.filter { !$0.isDrive } }
+         }
+     }
+diff --git a/Cloudn/Views/Accounts/WebDAVLoginView.swift b/Cloudn/Views/Accounts/WebDAVLoginView.swift
+index 1d503e9..67d6014 100644
+--- a/Cloudn/Views/Accounts/WebDAVLoginView.swift
++++ b/Cloudn/Views/Accounts/WebDAVLoginView.swift
+@@ -4,7 +4,7 @@ import SwiftUI
+ 
+ /// 连接 WebDAV 服务器（坚果云、NAS、OpenList 等）：地址 + 用户名 + 密码，校验能列出根目录后保存
+ struct WebDAVLoginView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+     @State private var url = ""
+     @State private var username = ""
+diff --git a/Cloudn/Views/Accounts/WebLoginView.swift b/Cloudn/Views/Accounts/WebLoginView.swift
+index dcefd95..1563869 100644
+--- a/Cloudn/Views/Accounts/WebLoginView.swift
++++ b/Cloudn/Views/Accounts/WebLoginView.swift
+@@ -1,5 +1,6 @@
+ // Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
+ import CloudnKit
++import Combine
+ import SwiftUI
+ import UIKit
+ import WebKit
+@@ -7,9 +8,9 @@ import WebKit
+ /// 网页登录：独立的非持久化 WKWebView 会话，登录完成后读取该平台域下的 Cookie，校验后存入钥匙串
+ struct WebLoginView: View {
+     let kind: AccountKind
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+-    @State private var store = WebLoginStore()
++    @StateObject private var store = WebLoginStore()
+     @State private var verifying = false
+     @State private var hint: String?
+ 
+@@ -141,32 +142,31 @@ struct WebLoginView: View {
+ }
+ 
+ @MainActor
+-@Observable
+-final class WebLoginStore {
+-    var progress: Double = 0
++final class WebLoginStore: ObservableObject {
++    @Published var progress: Double = 0
+     /// 页面加载失败的说明（内嵌网页加载失败时只会是一片空白，得自己显示出来）
+-    var loadError: String?
++    @Published var loadError: String?
+     /// 已收到页面（开始渲染）；之前显示「正在打开」
+-    var committed = false
++    @Published var committed = false
+     /// 每次重试加一，用来重新计时
+-    var attempt = 0
++    @Published var attempt = 0
+     /// 页面打开了却一片空白（脚本 / 资源没加载出来）
+-    var blank = false
+-    var blankHint = ""
++    @Published var blank = false
++    @Published var blankHint = ""
+     /// 已改用电脑版页面（桌面 UA）
+-    var desktop = false
++    @Published var desktop = false
+     /// 最近一次主页面的 HTTP 状态码与站点（空白时据此说明原因）
+-    @ObservationIgnored var lastStatus = 0
+-    @ObservationIgnored var lastHost = ""
++    var lastStatus = 0
++    var lastHost = ""
+     /// 海外平台：连不上时提示开 VPN / 代理；国内网站只提示检查网络
+-    @ObservationIgnored var overseas = false
+-    @ObservationIgnored private var blankCheck: Task<Void, Never>?
+-    @ObservationIgnored let dataStore: WKWebsiteDataStore = {
++    var overseas = false
++    private var blankCheck: Task<Void, Never>?
++    let dataStore: WKWebsiteDataStore = {
+         let store = WKWebsiteDataStore.nonPersistent()
+         store.useAppProxy()
+         return store
+     }()
+-    @ObservationIgnored weak var webView: WKWebView?
++    weak var webView: WKWebView?
+ 
+     /// 页面空白时改用电脑版页面：有的站点手机版脚本在内嵌网页里跑不起来
+     func switchToDesktop(_ url: URL) {
+@@ -278,7 +278,7 @@ final class WebLoginStore {
+ 
+ struct LoginWebView: UIViewRepresentable {
+     let kind: AccountKind
+-    let store: WebLoginStore
++    @ObservedObject var store: WebLoginStore
+ 
+     func makeUIView(context: Context) -> WKWebView {
+         store.overseas = OverseasAccount.kinds.contains(kind)
+diff --git a/Cloudn/Views/Components/DownloadStateControl.swift b/Cloudn/Views/Components/DownloadStateControl.swift
+index 46075db..f2cf41e 100644
+--- a/Cloudn/Views/Components/DownloadStateControl.swift
++++ b/Cloudn/Views/Components/DownloadStateControl.swift
+@@ -4,7 +4,7 @@ import SwiftUI
+ 
+ /// 行尾的下载键：没下载时是下载键，取链中转圈，下载中变成进度环（点按暂停 / 继续），完成打勾，失败给重试
+ struct DownloadStateControl: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     let item: DownloadItem?
+     var busy = false
+     var size: CGFloat = 32
+@@ -44,10 +44,10 @@ struct DownloadStateControl: View {
+             }
+         }
+         .frame(width: max(size, 44), height: max(size, 44))
+-        .animation(.snappy(duration: 0.25), value: item?.status)
+-        .animation(.snappy(duration: 0.25), value: busy)
++        .animation(.cnSnappy(duration: 0.25), value: item?.status)
++        .animation(.cnSnappy(duration: 0.25), value: busy)
+         // 看着它下完：完成那一刻轻轻一下
+-        .sensoryFeedback(.success, trigger: item?.status) { old, new in Self.justCompleted(old, new) }
++        .cnFeedback(.success, trigger: item?.status) { old, new in Self.justCompleted(old, new) }
+     }
+ 
+     /// 刚从别的状态变成「已完成」（单独写成函数：放在修饰链的闭包里，编译器推断类型太慢）
+diff --git a/Cloudn/Views/Components/FilePreview.swift b/Cloudn/Views/Components/FilePreview.swift
+index b2b9b76..71aff45 100644
+--- a/Cloudn/Views/Components/FilePreview.swift
++++ b/Cloudn/Views/Components/FilePreview.swift
+@@ -10,7 +10,7 @@ import UIKit
+ /// 下载好的文件全屏预览：按类型选最合适的查看方式，顶部统一的深色操作栏（关闭 / 分享 / 更多），轻点画面隐藏或显示
+ struct FilePreviewView: View {
+     let url: URL
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+     @State private var chromeVisible = true
+     @State private var player: AVPlayer?
+diff --git a/Cloudn/Views/Components/LinkDrop.swift b/Cloudn/Views/Components/LinkDrop.swift
+index 0d20bc9..c7ba5ad 100644
+--- a/Cloudn/Views/Components/LinkDrop.swift
++++ b/Cloudn/Views/Components/LinkDrop.swift
+@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
+ 
+ /// 把链接、文字或 .torrent 文件拖进 App（iPad 分屏、台前调度，或从别的 App 拖过来）：交给解析页，和粘贴一样处理
+ struct LinkDropModifier: ViewModifier {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+     @State private var targeted = false
+ 
+diff --git a/Cloudn/Views/Components/MediaPreview.swift b/Cloudn/Views/Components/MediaPreview.swift
+index 5c0979d..d741756 100644
+--- a/Cloudn/Views/Components/MediaPreview.swift
++++ b/Cloudn/Views/Components/MediaPreview.swift
+@@ -77,7 +77,7 @@ struct MediaPreviewView: View {
+             if page.isEmpty { page = item.url }
+             if player == nil && failure == nil { startPlayer() }
+         }
+-        .sensoryFeedback(.selection, trigger: page)
++        .cnFeedback(.selection, trigger: page)
+         .onDisappear { player?.pause() }
+     }
+ 
+diff --git a/Cloudn/Views/Components/TextPreview.swift b/Cloudn/Views/Components/TextPreview.swift
+index 7e4025e..4007acc 100644
+--- a/Cloudn/Views/Components/TextPreview.swift
++++ b/Cloudn/Views/Components/TextPreview.swift
+@@ -61,7 +61,7 @@ struct TextPreviewView: View {
+                     ToolbarItem(placement: .primaryAction) {
+                         Button { Clipboard.copy(text); copied += 1 } label: { Image(icon: .paste) }
+                             .accessibilityLabel("复制全文")
+-                            .sensoryFeedback(.success, trigger: copied)
++                            .cnFeedback(.success, trigger: copied)
+                     }
+                 }
+             }
+diff --git a/Cloudn/Views/Components/Theme.swift b/Cloudn/Views/Components/Theme.swift
+index 7b088ad..09f7822 100644
+--- a/Cloudn/Views/Components/Theme.swift
++++ b/Cloudn/Views/Components/Theme.swift
+@@ -465,7 +465,7 @@ struct FilterChip: View {
+         }
+         .buttonStyle(.plain)
+         .accessibilityAddTraits(selected ? .isSelected : [])
+-        .sensoryFeedback(.selection, trigger: selected)
++        .cnFeedback(.selection, trigger: selected)
+     }
+ }
+ 
+diff --git a/Cloudn/Views/Components/Toast.swift b/Cloudn/Views/Components/Toast.swift
+index d1c1db5..7476d2b 100644
+--- a/Cloudn/Views/Components/Toast.swift
++++ b/Cloudn/Views/Components/Toast.swift
+@@ -21,7 +21,7 @@ extension View {
+                 .floatingShadow()
+                 .padding(.horizontal, 24)
+                 .padding(.bottom, 64 + lift)
+-                .sensoryFeedback(t.isError ? .error : .success, trigger: t.id)
++                .cnFeedback(t.isError ? .error : .success, trigger: t.id)
+                 .transition(.move(edge: .bottom).combined(with: .opacity))
+                 .id(t.id)
+                 .task(id: t.id) {
+@@ -30,7 +30,7 @@ extension View {
+                 }
+             }
+         }
+-        .animation(.spring(duration: 0.35), value: toast.wrappedValue)
++        .animation(.cnSpring(duration: 0.35), value: toast.wrappedValue)
+     }
+ 
+     /// 页面底部有浮动操作条（全部下载、输入框等）时登记它的高度：这一页显示时轻提示抬到操作条上方
+@@ -41,7 +41,7 @@ extension View {
+ 
+ private struct ToastLift: ViewModifier {
+     let height: CGFloat
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     /// 按页面登记：返回上一页时新页面的出现可能早于旧页面的消失，各记各的，互不覆盖
+     @State private var id = UUID()
+ 
+diff --git a/Cloudn/Views/Components/ToastWindow.swift b/Cloudn/Views/Components/ToastWindow.swift
+index 2783eab..9e0d923 100644
+--- a/Cloudn/Views/Components/ToastWindow.swift
++++ b/Cloudn/Views/Components/ToastWindow.swift
+@@ -10,7 +10,7 @@ final class ToastWindowPresenter {
+ 
+     func install(in scene: UIWindowScene, model: AppModel) {
+         guard window == nil else { return }
+-        let host = UIHostingController(rootView: ToastHost().environment(model))
++        let host = UIHostingController(rootView: ToastHost().environmentObject(model))
+         host.view.backgroundColor = .clear
+         let window = UIWindow(windowScene: scene)
+         window.rootViewController = host
+@@ -22,10 +22,10 @@ final class ToastWindowPresenter {
+ }
+ 
+ private struct ToastHost: View {
+-    @Environment(AppModel.self) private var model
++    @EnvironmentObject private var model: AppModel
+ 
+     var body: some View {
+-        @Bindable var model = model
++        @CNBindable var model = model
+         Color.clear
+             .toastOverlay($model.toast, lift: model.toastLifts.values.max() ?? 0)
+             .preferredColorScheme(model.settings.appearance.colorScheme)
+diff --git a/Cloudn/Views/Downloads/DownloadDebugView.swift b/Cloudn/Views/Downloads/DownloadDebugView.swift
+index 5afc04a..78fb626 100644
+--- a/Cloudn/Views/Downloads/DownloadDebugView.swift
++++ b/Cloudn/Views/Downloads/DownloadDebugView.swift
+@@ -7,7 +7,7 @@ import UIKit
+ /// 下载页长按 →「调试信息」：单个任务的地址、请求头、分片、错误与相关日志，可整份复制给开发者。
+ /// Cookie / 令牌类请求头只显示开头几位，直链查询串照原样保留（复制前会去掉）
+ struct DownloadDebugView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+     let itemId: UUID
+     @State private var sha256: String?
+diff --git a/Cloudn/Views/Downloads/DownloadsView.swift b/Cloudn/Views/Downloads/DownloadsView.swift
+index 6d005fb..619dc7a 100644
+--- a/Cloudn/Views/Downloads/DownloadsView.swift
++++ b/Cloudn/Views/Downloads/DownloadsView.swift
+@@ -1,10 +1,11 @@
+ // Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
+ import CloudnKit
++import Combine
+ import SwiftUI
+ import UIKit
+ 
+ struct DownloadsView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @State private var filter: Filter = .all
+     @State private var previewURL: URL?
+     @State private var selecting = false
+@@ -15,7 +16,7 @@ struct DownloadsView: View {
+     @State private var confirmClear = false
+     @State private var refreshing = Set<UUID>()
+     /// 速度曲线的采样单独放在一个可观察对象里：只有汇总卡片读它，每秒采样不会让整个列表重绘
+-    @State private var speed = SpeedSampler()
++    @StateObject private var speed = SpeedSampler()
+     /// 展开的分组
+     @State private var expanded = Set<UUID>()
+     /// 正在看调试信息的任务
+@@ -173,7 +174,7 @@ struct DownloadsView: View {
+         if selecting {
+             if allOn { selection.subtract(ids) } else { selection.formUnion(ids) }
+         } else {
+-            withAnimation(.snappy(duration: 0.25)) {
++            withAnimation(.cnSnappy(duration: 0.25)) {
+                 if open { expanded.remove(id) } else { expanded.insert(id) }
+             }
+         }
+@@ -241,10 +242,10 @@ struct DownloadsView: View {
+                             if allOn { selection.subtract(visible) } else { selection.formUnion(visible) }
+                         }
+                         .disabled(visible.isEmpty)
+-                        Button("完成") { withAnimation(.snappy(duration: 0.25)) { selecting = false; selection = [] } }.fontWeight(.semibold)
++                        Button("完成") { withAnimation(.cnSnappy(duration: 0.25)) { selecting = false; selection = [] } }.fontWeight(.semibold)
+                     } else {
+                         Menu {
+-                            Button { withAnimation(.snappy(duration: 0.25)) { selecting = true } } label: { Label("选择", glyph: .checkCircle) }
++                            Button { withAnimation(.cnSnappy(duration: 0.25)) { selecting = true } } label: { Label("选择", glyph: .checkCircle) }
+                             Button { app.downloads.resumeAll() } label: { Label("全部继续", glyph: .play) }
+                                 .disabled(!app.downloads.items.contains { $0.status == .paused || $0.status == .failed })
+                             Button { app.downloads.pauseAll() } label: { Label("全部暂停", glyph: .pause) }
+@@ -265,12 +266,12 @@ struct DownloadsView: View {
+             .exportPicker(urls: $exportURLs) { done in
+                 guard done else { return }
+                 app.show("已保存到「文件」")
+-                withAnimation(.snappy(duration: 0.25)) { selecting = false; selection = [] }
++                withAnimation(.cnSnappy(duration: 0.25)) { selecting = false; selection = [] }
+             }
+             .safeAreaInset(edge: .bottom) {
+                 if selecting { selectionBar.padding(.horizontal, 16).padding(.bottom, 8) }
+             }
+-            .sensoryFeedback(.selection, trigger: selection)
++            .cnFeedback(.selection, trigger: selection)
+             .task { await speed.run(app.downloads) }
+             .fullScreenCover(item: Binding(get: { previewURL.map(IdentifiedURL.init) }, set: { previewURL = $0?.url })) { item in
+                 FilePreviewView(url: item.url)
+@@ -345,7 +346,7 @@ struct DownloadsView: View {
+         let chosen = app.downloads.items.filter { selection.contains($0.id) }
+         app.downloads.remove(chosen, deleteFile: deleteFiles)
+         app.show("已删除 \(chosen.count) 个任务")
+-        withAnimation(.snappy(duration: 0.25)) {
++        withAnimation(.cnSnappy(duration: 0.25)) {
+             selection = []
+             selecting = false
+         }
+@@ -368,7 +369,7 @@ struct DownloadsView: View {
+             }
+         }
+         .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+-        .sensoryFeedback(.selection, trigger: filter)
++        .cnFeedback(.selection, trigger: filter)
+     }
+ 
+     private var emptyTitle: String {
+@@ -565,9 +566,8 @@ enum DownloadEntry: Identifiable {
+ 
+ /// 每秒记一次总速度，给速度曲线用；没有任务在下时清空
+ @MainActor
+-@Observable
+-final class SpeedSampler {
+-    private(set) var samples: [Double] = []
++final class SpeedSampler: ObservableObject {
++    @Published private(set) var samples: [Double] = []
+ 
+     func run(_ store: DownloadStore) async {
+         while !Task.isCancelled {
+@@ -586,7 +586,7 @@ final class SpeedSampler {
+ /// 顶部汇总：总速度、预计剩余时间、速度曲线、总进度
+ private struct SummaryCard: View {
+     let items: [DownloadItem]
+-    let sampler: SpeedSampler
++    @ObservedObject var sampler: SpeedSampler
+ 
+     var body: some View {
+         let active = items.filter { $0.status.isActive }
+@@ -611,7 +611,7 @@ private struct SummaryCard: View {
+                         .font(.serif(26, relativeTo: .title))
+                         .foregroundStyle(Color.ink)
+                         .contentTransition(.numericText())
+-                        .animation(.snappy, value: speed)
++                        .animation(.cnSnappy, value: speed)
+                     Spacer()
+                     VStack(alignment: .trailing, spacing: 2) {
+                         let eta = speed > 0 && total > received ? Humanize.eta(Double(total - received) / speed) : ""
+@@ -801,7 +801,7 @@ struct DownloadRow: View {
+         }
+         .padding(.vertical, 4)
+         // 下载页里看着任务完成时轻轻一下（行尾换成「保存」，进度环不在了，所以放在整行上）
+-        .sensoryFeedback(.success, trigger: item.status) { old, new in DownloadStateControl.justCompleted(old, new) }
++        .cnFeedback(.success, trigger: item.status) { old, new in DownloadStateControl.justCompleted(old, new) }
+     }
+ 
+     private var isTransferring: Bool { item.status == .running || item.status == .merging }
+diff --git a/Cloudn/Views/Drive/DriveShareSheet.swift b/Cloudn/Views/Drive/DriveShareSheet.swift
+index 5e65935..8fc2403 100644
+--- a/Cloudn/Views/Drive/DriveShareSheet.swift
++++ b/Cloudn/Views/Drive/DriveShareSheet.swift
+@@ -6,7 +6,7 @@ import SwiftUI
+ struct DriveShareSheet: View {
+     let manager: DriveManager
+     let file: ShareFile
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+     @State private var options = ShareOptions()
+     @State private var usePassword = false
+diff --git a/Cloudn/Views/Drive/MyDriveView.swift b/Cloudn/Views/Drive/MyDriveView.swift
+index d6d287f..939a6d7 100644
+--- a/Cloudn/Views/Drive/MyDriveView.swift
++++ b/Cloudn/Views/Drive/MyDriveView.swift
+@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
+ /// 「我的网盘」入口：容量 + 根目录
+ struct MyDriveView: View {
+     let platform: SharePlatform
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @State private var quota: DriveQuota?
+ 
+     var body: some View {
+@@ -33,7 +33,7 @@ struct DriveFolderView: View {
+     let title: String
+     var quota: DriveQuota?
+ 
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @State private var items: [ShareFile] = []
+     /// 一开始就算「加载中」：首次请求发出前不闪一下「空文件夹」
+     @State private var loading = true
+@@ -149,12 +149,12 @@ struct DriveFolderView: View {
+         }
+         .photosPicker(isPresented: $pickingMedia, selection: $mediaItems, matching: .any(of: [.images, .videos]),
+                       preferredItemEncoding: .current)
+-        .onChange(of: mediaItems) { _, picked in
++        .cnOnChange(of: mediaItems) { _, picked in
+             guard !picked.isEmpty else { return }
+             mediaItems = []
+             exportMedia(picked)
+         }
+-        .onChange(of: app.uploads.finishedRevision) { _, _ in Task { await load() } }
++        .cnOnChange(of: app.uploads.finishedRevision) { _, _ in Task { await load() } }
+         .task {
+             guard !loaded else { return }
+             await load()
+@@ -512,7 +512,7 @@ struct PickedMediaFile: Transferable {
+ 
+ /// 上传中的一行：阶段 + 进度，可取消；失败的可重试
+ struct UploadRow: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     let item: UploadStore.Item
+ 
+     private var statusText: String {
+diff --git a/Cloudn/Views/Drive/OfflineDownloadViews.swift b/Cloudn/Views/Drive/OfflineDownloadViews.swift
+index d4eaf09..84d9c34 100644
+--- a/Cloudn/Views/Drive/OfflineDownloadViews.swift
++++ b/Cloudn/Views/Drive/OfflineDownloadViews.swift
+@@ -20,7 +20,7 @@ struct OfflineTasksView: View {
+     let folderId: String
+     let folderTitle: String
+ 
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @State private var tasks: [OfflineTask] = []
+     @State private var loading = true
+     @State private var errorMessage: String?
+@@ -103,7 +103,7 @@ struct OfflineTasksView: View {
+             }
+         }
+         .padding(.vertical, 4)
+-        .animation(.snappy, value: task.progress)
++        .animation(.cnSnappy, value: task.progress)
+     }
+ 
+     private func detail(_ task: OfflineTask) -> String {
+@@ -141,7 +141,7 @@ struct OfflineTasksView: View {
+ 
+     private func remove(_ task: OfflineTask) {
+         guard let downloader else { return }
+-        withAnimation(.snappy) { tasks.removeAll { $0.id == task.id } }
++        withAnimation(.cnSnappy) { tasks.removeAll { $0.id == task.id } }
+         Task {
+             do {
+                 try await downloader.removeOfflineTasks([task.id])
+@@ -155,7 +155,7 @@ struct OfflineTasksView: View {
+ 
+ /// 添加离线任务：粘贴链接（每行一个）→ 选网盘与保存位置 → 提交
+ struct AddOfflineTaskView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+ 
+     @State private var platform: SharePlatform?
+@@ -255,7 +255,7 @@ struct AddOfflineTaskView: View {
+                 if platform == nil { platform = app.offlineDrives.first }
+                 if links.isEmpty { editing = true }
+             }
+-            .onChange(of: platform) { _, _ in
++            .cnOnChange(of: platform) { _, _ in
+                 // 换了网盘：保存位置回到根目录
+                 guard !fixedPlatform else { return }
+                 folderId = ""
+diff --git a/Cloudn/Views/GitHub/GitHubViews.swift b/Cloudn/Views/GitHub/GitHubViews.swift
+index 6249798..6f85626 100644
+--- a/Cloudn/Views/GitHub/GitHubViews.swift
++++ b/Cloudn/Views/GitHub/GitHubViews.swift
+@@ -38,7 +38,7 @@ extension AppModel {
+ /// 用户 / 组织的仓库列表
+ struct GitHubAccountView: View {
+     let owner: String
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @State private var repos: [GitHubRepo] = []
+     @State private var loading = true
+     @State private var error: String?
+@@ -105,7 +105,7 @@ struct GitHubRepoView: View {
+     let owner: String
+     let repo: String
+     let subPath: String?
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @State private var info: GitHubRepo?
+     @State private var tab: Tab = .files
+     @State private var error: String?
+@@ -188,7 +188,7 @@ struct GitHubDirectoryView: View {
+     let ref: String
+     let path: String
+     var description = ""
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @State private var entries: [GitHubEntry] = []
+     @State private var loading = true
+     @State private var loaded = false
+@@ -280,7 +280,7 @@ struct GitHubReleasesView: View {
+     let owner: String
+     let repo: String
+     var isPrivate = false
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @State private var releases: [GitHubRelease] = []
+     @State private var loading = true
+     @State private var loaded = false
+@@ -362,7 +362,7 @@ struct GitHubReleasesView: View {
+ 
+ /// 设置页：GitHub Token 与下载镜像
+ struct GitHubSettingsView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @State private var token = ""
+     @State private var checking = false
+     @State private var probing = false
+@@ -370,7 +370,7 @@ struct GitHubSettingsView: View {
+     @State private var latency: [String: Int?] = [:]
+ 
+     var body: some View {
+-        @Bindable var settings = app.settings
++        @CNBindable var settings = app.settings
+         Form {
+             Group {
+                 Section {
+diff --git a/Cloudn/Views/Resolve/BatchView.swift b/Cloudn/Views/Resolve/BatchView.swift
+index d11c3f8..19e042d 100644
+--- a/Cloudn/Views/Resolve/BatchView.swift
++++ b/Cloudn/Views/Resolve/BatchView.swift
+@@ -4,9 +4,9 @@ import SwiftUI
+ 
+ /// 批量解析进度：逐条显示等待 / 解析中 / 已加入下载 / 失败
+ struct BatchView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+-    let job: BatchJob
++    @ObservedObject var job: BatchJob
+     /// 失败的那条改用网页嗅探
+     @State private var sniffing: SniffLink?
+ 
+diff --git a/Cloudn/Views/Resolve/BookmarksView.swift b/Cloudn/Views/Resolve/BookmarksView.swift
+index a6124ca..4a7cdbb 100644
+--- a/Cloudn/Views/Resolve/BookmarksView.swift
++++ b/Cloudn/Views/Resolve/BookmarksView.swift
+@@ -3,7 +3,7 @@ import SwiftUI
+ import UIKit
+ 
+ struct BookmarksView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+     let onOpen: (Bookmark) -> Void
+     @State private var renaming: Bookmark?
+diff --git a/Cloudn/Views/Resolve/ResolveView.swift b/Cloudn/Views/Resolve/ResolveView.swift
+index cbe4500..d68c39f 100644
+--- a/Cloudn/Views/Resolve/ResolveView.swift
++++ b/Cloudn/Views/Resolve/ResolveView.swift
+@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
+ 
+ /// 解析页：输入框停在底部（单手够得着，随键盘上移），上面是收藏与最近记录
+ struct ResolveView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @State private var input = ""
+     @State private var pwd = ""
+     @State private var editingPwd = false
+@@ -126,20 +126,20 @@ struct ResolveView: View {
+             // 输入框浮在底部：提示出现在它上方
+             .liftsToast()
+             .toolbar(.hidden, for: .navigationBar)
+-            .navigationDestination(item: $shareModel) { ShareBrowserView(model: $0) }
++            .cnNavigationDestination(item: $shareModel) { ShareBrowserView(model: $0) }
+             // 离开分享页（返回或换了一个分享）：清掉预览 / 复制直链留下的临时转存
+-            .onChange(of: shareModel) { old, new in
++            .cnOnChange(of: shareModel) { old, new in
+                 if let old, old != new { old.releaseAllTemporary() }
+             }
+-            .navigationDestination(item: $videoResult) { VideoResultView(result: $0) }
+-            .navigationDestination(item: $githubLink) { link in
++            .cnNavigationDestination(item: $videoResult) { VideoResultView(result: $0) }
++            .cnNavigationDestination(item: $githubLink) { link in
+                 switch link {
+                 case .account(let owner): GitHubAccountView(owner: owner)
+                 case .repository(let owner, let repo, let sub): GitHubRepoView(owner: owner, repo: repo, subPath: sub)
+                 case .file: EmptyView()
+                 }
+             }
+-            .navigationDestination(item: $torrentTarget) { TorrentView(target: $0) }
++            .cnNavigationDestination(item: $torrentTarget) { TorrentView(target: $0) }
+             .documentPicker(isPresented: $importingTorrent, types: [.torrent, .data]) { urls in
+                 if let url = urls.first {
+                     app.openTorrentFile(url)
+@@ -197,12 +197,12 @@ struct ResolveView: View {
+                 .presentationDetents([.medium, .large])
+             }
+         }
+-        .sensoryFeedback(.selection, trigger: detectionKey) { _, new in !new.isEmpty }
++        .cnFeedback(.selection, trigger: detectionKey) { _, new in !new.isEmpty }
+         // 作品解析成功、进入结果页时
+-        .sensoryFeedback(.success, trigger: videoResult?.id) { _, new in new != nil }
++        .cnFeedback(.success, trigger: videoResult?.id) { _, new in new != nil }
+         .onAppear(perform: consumePending)
+-        .onChange(of: app.pendingInput) { _, _ in consumePending() }
+-        .onChange(of: app.pendingTorrent) { _, _ in consumePending() }
++        .cnOnChange(of: app.pendingInput) { _, _ in consumePending() }
++        .cnOnChange(of: app.pendingTorrent) { _, _ in consumePending() }
+         .task { await checkClipboard() }
+         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+             Task { await checkClipboard() }
+@@ -240,7 +240,7 @@ struct ResolveView: View {
+                     .textInputAutocapitalization(.never)
+                     .autocorrectionDisabled()
+                     .submitLabel(.go)
+-                    .onChange(of: input) { old, new in
++                    .cnOnChange(of: input) { old, new in
+                         if handleReturnKey(old: old, new: new) { return }
+                         // 认出要用隐藏浏览器的链接：趁用户点「解析」前先把网页进程拉起来（已在解析时不用）
+                         if !working, case .video(let link) = detected, HeadlessWebExtractor.needsWebPage(link) { HeadlessWebExtractor.prewarm() }
+@@ -807,7 +807,7 @@ struct ResolveView: View {
+                 // 翻页解析每拿到一页报一次进度：只留最新一条，显示在识别行
+                 let watcher = Task { @MainActor in
+                     for await snapshot in progress.updates where collectProgress === progress {
+-                        withAnimation(.snappy) { collectSnapshot = snapshot }
++                        withAnimation(.cnSnappy) { collectSnapshot = snapshot }
+                     }
+                 }
+                 defer {
+@@ -1022,7 +1022,7 @@ private struct HistoryRow: View {
+ 
+ /// 批量任务的一行：标题、进度、失败数；点开回到进度页
+ private struct BatchJobRow: View {
+-    let job: BatchJob
++    @ObservedObject var job: BatchJob
+     let action: () -> Void
+     @Environment(\.dynamicTypeSize) private var typeSize
+ 
+diff --git a/Cloudn/Views/Resolve/SaveToDriveView.swift b/Cloudn/Views/Resolve/SaveToDriveView.swift
+index dbbc0be..7af8346 100644
+--- a/Cloudn/Views/Resolve/SaveToDriveView.swift
++++ b/Cloudn/Views/Resolve/SaveToDriveView.swift
+@@ -4,9 +4,9 @@ import SwiftUI
+ 
+ /// 选择「我的网盘」里的目标文件夹并转存
+ struct SaveToDriveView: View {
+-    let model: ShareBrowserModel
++    @ObservedObject var model: ShareBrowserModel
+     let files: [ShareFile]
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+     @State private var path: [Crumb] = []
+     @State private var folders: [ShareFile] = []
+diff --git a/Cloudn/Views/Resolve/ShareBrowserModel.swift b/Cloudn/Views/Resolve/ShareBrowserModel.swift
+index db0d3bf..e6ef7c8 100644
+--- a/Cloudn/Views/Resolve/ShareBrowserModel.swift
++++ b/Cloudn/Views/Resolve/ShareBrowserModel.swift
+@@ -1,7 +1,7 @@
+ // Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
+ import CloudnKit
+ import Foundation
+-import Observation
++import Combine
+ 
+ struct Crumb: Hashable {
+     let id: String
+@@ -9,33 +9,32 @@ struct Crumb: Hashable {
+ }
+ 
+ @MainActor
+-@Observable
+-final class ShareBrowserModel: Hashable, Identifiable {
++final class ShareBrowserModel: Hashable, Identifiable, ObservableObject {
+     nonisolated static func == (lhs: ShareBrowserModel, rhs: ShareBrowserModel) -> Bool { lhs === rhs }
+     nonisolated func hash(into hasher: inout Hasher) { hasher.combine(ObjectIdentifier(self)) }
+ 
+     let share: ParsedShare
+     let sourceText: String
+-    var pwd: String
+-    private(set) var session: ShareSession?
+-    private(set) var crumbs: [Crumb] = []
+-    private(set) var files: [ShareFile] = []
+-    private(set) var loading = false
+-    private(set) var errorMessage: String?
+-    private(set) var needsPassword = false
+-    var selecting = false
+-    var selection = Set<String>()
+-    private(set) var busyFileIds = Set<String>()
++    @Published var pwd: String
++    @Published private(set) var session: ShareSession?
++    @Published private(set) var crumbs: [Crumb] = []
++    @Published private(set) var files: [ShareFile] = []
++    @Published private(set) var loading = false
++    @Published private(set) var errorMessage: String?
++    @Published private(set) var needsPassword = false
++    @Published var selecting = false
++    @Published var selection = Set<String>()
++    @Published private(set) var busyFileIds = Set<String>()
+     /// 批量取链进度；total 为 0 表示还在展开文件夹、清点要下载的文件
+-    private(set) var batch: (done: Int, total: Int)?
++    @Published private(set) var batch: (done: Int, total: Int)?
+ 
+-    @ObservationIgnored private unowned let app: AppModel
+-    @ObservationIgnored private var cache: [String: [ShareFile]] = [:]
++    private unowned let app: AppModel
++    private var cache: [String: [ShareFile]] = [:]
+     /// 预览 / 在线查看 / 复制直链取到的临时转存（夸克 / UC 兜底、115、光鸭）：清理凭据 → 账号序号。
+     /// 下载入队的由下载完成后清理；这些没有下载任务兜底，预览关闭、复制约一分钟后、离开分享页时在这里清理
+-    @ObservationIgnored private var temporaryCopies: [String: Int] = [:]
++    private var temporaryCopies: [String: Int] = [:]
+     /// 正在打开分享：.task 重入（页面重新出现）、登录回来重试等同时触发时只开一次
+-    @ObservationIgnored private var opening = false
++    private var opening = false
+ 
+     init(app: AppModel, share: ParsedShare, pwd: String?, sourceText: String) {
+         self.app = app
+diff --git a/Cloudn/Views/Resolve/ShareBrowserView.swift b/Cloudn/Views/Resolve/ShareBrowserView.swift
+index 9704a89..19127f6 100644
+--- a/Cloudn/Views/Resolve/ShareBrowserView.swift
++++ b/Cloudn/Views/Resolve/ShareBrowserView.swift
+@@ -4,8 +4,8 @@ import SwiftUI
+ import UIKit
+ 
+ struct ShareBrowserView: View {
+-    @Environment(AppModel.self) private var app
+-    @Bindable var model: ShareBrowserModel
++    @EnvironmentObject private var app: AppModel
++    @ObservedObject var model: ShareBrowserModel
+     @State private var actionFile: ShareFile?
+     @State private var preview: MediaPreviewItem?
+     @State private var retryPwd = ""
+@@ -54,7 +54,7 @@ struct ShareBrowserView: View {
+                 .readableWidth()
+             }
+             .coordinateSpace(name: Self.space)
+-            .scrollPosition(id: $topRow, anchor: .top)
++            .cnScrollPosition(id: $topRow, anchor: .top)
+             .scrollDismissesKeyboard(.immediately)
+             .background(Color.paper)
+             .onPreferenceChange(HeaderOffsetKey.self) { y in
+@@ -64,7 +64,7 @@ struct ShareBrowserView: View {
+             .navigationTitle(headerHidden ? (model.crumbs.last?.name ?? model.title) : "")
+             .navigationBarTitleDisplayMode(.inline)
+             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .automatic), prompt: "在当前文件夹中搜索")
+-            .onChange(of: model.currentDir) { query = "" }
++            .cnOnChange(of: model.currentDir) { query = "" }
+             .toolbar { toolbar }
+             .safeAreaInset(edge: .bottom) { actionBar.padding(.horizontal, 16).padding(.bottom, 8).readableWidth() }
+             .liftsToast(72)
+@@ -72,11 +72,11 @@ struct ShareBrowserView: View {
+             .task { await model.open() }
+             // 离开分享页（返回、切到别的标签页）：预览 / 复制直链留下的临时转存一并清理；全屏预览盖住时不算离开
+             .onDisappear { if preview == nil && textPreview == nil && filePreview == nil { model.releaseAllTemporary() } }
+-            .sensoryFeedback(.selection, trigger: model.selection)
+-            .animation(.snappy(duration: 0.25), value: model.selecting)
++            .cnFeedback(.selection, trigger: model.selection)
++            .animation(.cnSnappy(duration: 0.25), value: model.selecting)
+             // 分享打开成功（列表出来）时轻轻一下
+-            .sensoryFeedback(.success, trigger: model.session != nil) { old, new in !old && new }
+-            .animation(.snappy(duration: 0.25), value: model.batch?.total)
++            .cnFeedback(.success, trigger: model.session != nil) { old, new in !old && new }
++            .animation(.cnSnappy(duration: 0.25), value: model.batch?.total)
+         }
+         .fullScreenCover(item: $preview, onDismiss: releasePreviewLink) { item in
+             MediaPreviewView(item: item)
+@@ -187,7 +187,7 @@ struct ShareBrowserView: View {
+                 .padding(.horizontal, 2)
+             }
+             .onAppear { bar.scrollTo(model.crumbs.count - 1, anchor: .trailing) }
+-            .onChange(of: model.crumbs.count) { withAnimation { bar.scrollTo(model.crumbs.count - 1, anchor: .trailing) } }
++            .cnOnChange(of: model.crumbs.count) { withAnimation { bar.scrollTo(model.crumbs.count - 1, anchor: .trailing) } }
+         }
+     }
+ 
+@@ -231,7 +231,7 @@ struct ShareBrowserView: View {
+                         if index < files.count - 1 { RowDivider(leading: model.selecting ? 96 : 64) }
+                     }
+                 }
+-                .scrollTargetLayout()
++                .cnScrollTargetLayout()
+             }
+             .card()
+             .overlay(alignment: .leading) { if model.selecting { dragStrip } }
+@@ -343,7 +343,7 @@ struct ShareBrowserView: View {
+             }
+         }
+         .card()
+-        .phaseAnimator([0.55, 1]) { view, phase in view.opacity(phase) } animation: { _ in .easeInOut(duration: 0.9) }
++        .cnPhasePulse()
+         .accessibilityLabel("正在加载")
+     }
+ 
+@@ -427,7 +427,7 @@ struct ShareBrowserView: View {
+                 .accessibilityLabel(model.isBookmarked ? "取消收藏" : "收藏")
+                 .disabled(model.session == nil)
+                 // 收藏是「成功」，取消收藏只是轻点一下
+-                .sensoryFeedback(trigger: model.isBookmarked) { _, now in now ? .success : .selection }
++                .cnFeedback(trigger: model.isBookmarked) { _, now in now ? .success : .selection }
+                 Menu {
+                     Button { model.selecting = true } label: { Label { Text("多选") } icon: { Image(icon: .checkCircle) } }
+                         .disabled(model.files.isEmpty)
+diff --git a/Cloudn/Views/Resolve/SnifferView.swift b/Cloudn/Views/Resolve/SnifferView.swift
+index 0e2959f..4f31b2b 100644
+--- a/Cloudn/Views/Resolve/SnifferView.swift
++++ b/Cloudn/Views/Resolve/SnifferView.swift
+@@ -1,5 +1,6 @@
+ // Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
+ import CloudnKit
++import Combine
+ import SwiftUI
+ import UIKit
+ import WebKit
+@@ -59,20 +60,20 @@ struct SniffedMedia: Identifiable, Equatable {
+ /// 适合没有专门适配的网站；用 MSE 分段播放（blob: 地址）的网站抓不到完整文件，
+ /// 但可以「录制视频流」：边播放边把页面喂给播放器的数据存下来。
+ struct SnifferView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+-    @State private var browser: SnifferBrowser
++    @StateObject private var browser: SnifferBrowser
+     /// 正在准备下载的地址（取 Cookie 要等一下）：连点不重复入队
+     @State private var enqueuing = Set<String>()
+ 
+     init(url: String) {
+-        _browser = State(initialValue: SnifferBrowser(url: url))
++        _browser = StateObject(wrappedValue: SnifferBrowser(url: url))
+     }
+ 
+     #if DEBUG
+     /// 截图模式：用预先放好演示结果的浏览器
+     init(browser: SnifferBrowser) {
+-        _browser = State(initialValue: browser)
++        _browser = StateObject(wrappedValue: browser)
+     }
+     #endif
+ 
+@@ -113,7 +114,7 @@ struct SnifferView: View {
+                 .sheet(isPresented: $browser.showingRecorder) { recorderSheet.presentationDetents([.medium, .large]) }
+         }
+         // 第一次发现媒体时轻提示一下（底部按钮由灰变亮）
+-        .sensoryFeedback(.success, trigger: browser.medias.isEmpty) { wasEmpty, isEmpty in wasEmpty && !isEmpty }
++        .cnFeedback(.success, trigger: browser.medias.isEmpty) { wasEmpty, isEmpty in wasEmpty && !isEmpty }
+         // 关掉嗅探页时还在录制：丢弃（正在保存的不受影响）
+         .onDisappear { browser.cancelRecording() }
+     }
+@@ -383,40 +384,39 @@ struct SnifferView: View {
+ 
+ /// 浏览器状态 + WKWebView（页面脚本把发现的媒体地址发回来）
+ @MainActor
+-@Observable
+-final class SnifferBrowser: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+-    @ObservationIgnored let webView: WKWebView
+-    private(set) var medias: [SniffedMedia] = []
+-    private(set) var title = ""
+-    private(set) var currentURL: String
+-    private(set) var canGoBack = false
+-    private(set) var canGoForward = false
+-    private(set) var loading = false
++final class SnifferBrowser: NSObject, WKNavigationDelegate, WKScriptMessageHandler, ObservableObject {
++    let webView: WKWebView
++    @Published private(set) var medias: [SniffedMedia] = []
++    @Published private(set) var title = ""
++    @Published private(set) var currentURL: String
++    @Published private(set) var canGoBack = false
++    @Published private(set) var canGoForward = false
++    @Published private(set) var loading = false
+     /// 页面没能打开时的原因（显示出错卡片）；开始新的导航时清掉
+-    private(set) var loadError: String?
++    @Published private(set) var loadError: String?
+     /// 有没有页面成功显示过：之后的导航失败（点了坏链接）不盖住已显示的页面
+-    @ObservationIgnored private var committed = false
+-    var showingList = false
+-    @ObservationIgnored private var seen = Set<String>()
++    private var committed = false
++    @Published var showingList = false
++    private var seen = Set<String>()
+     /// 等待探测的媒体与正在探测的数量：页面一下子请求几十个地址时，同时最多探测 maxProbes 个
+-    @ObservationIgnored private var probeQueue: [SniffedMedia] = []
+-    @ObservationIgnored private var activeProbes = 0
++    private var probeQueue: [SniffedMedia] = []
++    private var activeProbes = 0
+     private static let maxProbes = 4
+ 
+     /// 页面里出现过的 MSE 轨道：SourceBuffer 编号 → MIME
+-    private(set) var mseTracks: [String: String] = [:]
+-    private(set) var recording = false
+-    private(set) var savingRecording = false
+-    private(set) var recordedBytes: Int64 = 0
+-    private(set) var recordedTracks = 0
+-    private(set) var recordCapped = false
+-    var showingRecorder = false
+-    @ObservationIgnored private var recorder: MSERecorder?
++    @Published private(set) var mseTracks: [String: String] = [:]
++    @Published private(set) var recording = false
++    @Published private(set) var savingRecording = false
++    @Published private(set) var recordedBytes: Int64 = 0
++    @Published private(set) var recordedTracks = 0
++    @Published private(set) var recordCapped = false
++    @Published var showingRecorder = false
++    private var recorder: MSERecorder?
+     /// 每次开始录制加一；页面脚本只在编号非 0 时回传数据
+-    @ObservationIgnored private var recordSession = 0
++    private var recordSession = 0
+     /// 每个 SourceBuffer 所在的框架（开始 / 停止录制要通知到 iframe 里）
+-    @ObservationIgnored private var mseFrames: [String: WKFrameInfo] = [:]
+-    @ObservationIgnored private var recordPage = ""
++    private var mseFrames: [String: WKFrameInfo] = [:]
++    private var recordPage = ""
+ 
+     var mseDetected: Bool { !mseTracks.isEmpty }
+ 
+diff --git a/Cloudn/Views/Resolve/TorrentView.swift b/Cloudn/Views/Resolve/TorrentView.swift
+index 82a1fb9..1710cff 100644
+--- a/Cloudn/Views/Resolve/TorrentView.swift
++++ b/Cloudn/Views/Resolve/TorrentView.swift
+@@ -16,7 +16,7 @@ struct TorrentTarget: Hashable, Identifiable {
+ 
+ /// 磁力 / 种子：先向节点要种子信息，列出文件勾选后下载
+ struct TorrentView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     let target: TorrentTarget
+     @State private var selected = Set<Int>()
+     @State private var offlining = false
+@@ -77,14 +77,14 @@ struct TorrentView: View {
+         }
+         .liftsToast()
+         .sheet(isPresented: $offlining) { AddOfflineTaskView(links: target.magnet.uri) }
+-        .sensoryFeedback(.selection, trigger: selected)
++        .cnFeedback(.selection, trigger: selected)
+         .onAppear {
+             // 一打开就记进「最近」：还没拿到种子信息就退出，也能从解析页找回来
+             if info == nil { app.bookmarks.record(title: title, text: target.magnet.uri, source: "磁力链接") }
+             app.torrents.start(target.magnet)
+             if let info, selected.isEmpty { selected = Set(info.visibleFiles.map(\.id)) }
+         }
+-        .onChange(of: info?.hexHash) { _, _ in
++        .cnOnChange(of: info?.hexHash) { _, _ in
+             guard let info else { return }
+             selected = Set(info.visibleFiles.map(\.id))
+             app.bookmarks.record(title: info.name, text: target.magnet.uri, source: "磁力链接")
+@@ -171,7 +171,7 @@ struct TorrentView: View {
+         .padding(16)
+         .frame(maxWidth: .infinity, alignment: .leading)
+         .card()
+-        .animation(.snappy, value: peers.known)
++        .animation(.cnSnappy, value: peers.known)
+     }
+ 
+     // MARK: 文件
+diff --git a/Cloudn/Views/Resolve/VideoResultView.swift b/Cloudn/Views/Resolve/VideoResultView.swift
+index b24ef0e..99e0e83 100644
+--- a/Cloudn/Views/Resolve/VideoResultView.swift
++++ b/Cloudn/Views/Resolve/VideoResultView.swift
+@@ -5,7 +5,7 @@ import UIKit
+ 
+ /// 视频 / 图集解析结果：封面 + 作者 + 正文，视频逐条下载，图集两列网格可多选
+ struct VideoResultView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     let result: VideoParseResult
+     @State private var preview: MediaPreviewItem?
+     @State private var selected = Set<UUID>()
+@@ -123,8 +123,8 @@ struct VideoResultView: View {
+         }
+         .safeAreaInset(edge: .bottom) { bottomBar.padding(.horizontal, 16).padding(.bottom, 8).readableWidth() }
+         .liftsToast()
+-        .sensoryFeedback(.selection, trigger: selected)
+-        .animation(.snappy(duration: 0.25), value: selecting)
++        .cnFeedback(.selection, trigger: selected)
++        .animation(.cnSnappy(duration: 0.25), value: selecting)
+         .fullScreenCover(item: $preview) { MediaPreviewView(item: $0) }
+         .sheet(item: $batchJob) { BatchView(job: $0) }
+         .sheet(item: $loginKind) { LoginSheet(kind: $0) }
+@@ -197,7 +197,7 @@ struct VideoResultView: View {
+                         .lineLimit(textExpanded ? nil : 4)
+                         .textSelection(.enabled)
+                     if result.text.count > 90 {
+-                        Button(textExpanded ? "收起" : "展开") { withAnimation(.snappy) { textExpanded.toggle() } }
++                        Button(textExpanded ? "收起" : "展开") { withAnimation(.cnSnappy) { textExpanded.toggle() } }
+                             .font(.footnote.weight(.medium))
+                             .buttonStyle(TextLinkButtonStyle())
+                     }
+diff --git a/Cloudn/Views/Settings/AccentPicker.swift b/Cloudn/Views/Settings/AccentPicker.swift
+index 301537e..610c0cc 100644
+--- a/Cloudn/Views/Settings/AccentPicker.swift
++++ b/Cloudn/Views/Settings/AccentPicker.swift
+@@ -3,7 +3,7 @@ import SwiftUI
+ 
+ /// 主题色：预设色块 + 系统取色器（色相 / 饱和度 / 明度任选）
+ struct AccentPicker: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+ 
+     var body: some View {
+         VStack(alignment: .leading, spacing: 12) {
+@@ -36,7 +36,7 @@ struct AccentPicker: View {
+                 }
+                 .padding(.vertical, 2)
+             }
+-            .sensoryFeedback(.selection, trigger: app.settings.accentHex)
++            .cnFeedback(.selection, trigger: app.settings.accentHex)
+         }
+     }
+ }
+diff --git a/Cloudn/Views/Settings/DownloadSettingsViews.swift b/Cloudn/Views/Settings/DownloadSettingsViews.swift
+index 95acc23..c4916aa 100644
+--- a/Cloudn/Views/Settings/DownloadSettingsViews.swift
++++ b/Cloudn/Views/Settings/DownloadSettingsViews.swift
+@@ -13,7 +13,7 @@ enum SpeedLimitOption: Int, CaseIterable, Identifiable {
+ 
+ /// 按平台覆盖单任务连接数（键是下载来源，即平台显示名）
+ struct PlatformConnectionsView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+ 
+     private var sources: [String] {
+         SharePlatform.allCases.map(\.displayName) + VideoPlatform.allCases.map(\.displayName) + ["GitHub", "直链"]
+diff --git a/Cloudn/Views/Settings/NetworkProxyView.swift b/Cloudn/Views/Settings/NetworkProxyView.swift
+index 14646f2..147c551 100644
+--- a/Cloudn/Views/Settings/NetworkProxyView.swift
++++ b/Cloudn/Views/Settings/NetworkProxyView.swift
+@@ -4,7 +4,7 @@ import SwiftUI
+ 
+ /// 设置页：应用内网络代理（HTTP / SOCKS5）
+ struct NetworkProxyView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @State private var host = ""
+     @State private var port = ""
+     @State private var testing = false
+@@ -14,7 +14,7 @@ struct NetworkProxyView: View {
+     struct TestFailure: Error { let message: String }
+ 
+     var body: some View {
+-        @Bindable var settings = app.settings
++        @CNBindable var settings = app.settings
+         Form {
+             Group {
+                 Section {
+@@ -81,9 +81,9 @@ struct NetworkProxyView: View {
+             port = String(app.settings.proxyPort)
+         }
+         .onDisappear(perform: commit)
+-        .onChange(of: app.settings.proxyKind) { result = nil }
+-        .onChange(of: host) { result = nil }
+-        .onChange(of: port) { result = nil }
++        .cnOnChange(of: app.settings.proxyKind) { result = nil }
++        .cnOnChange(of: host) { result = nil }
++        .cnOnChange(of: port) { result = nil }
+         .task(id: port) {
+             // 端口停止输入 0.8 秒后写入设置（逐字写入会让网络会话跟着反复重建）
+             try? await Task.sleep(for: .milliseconds(800))
+diff --git a/Cloudn/Views/Settings/SettingsView.swift b/Cloudn/Views/Settings/SettingsView.swift
+index 9816937..a3a1b76 100644
+--- a/Cloudn/Views/Settings/SettingsView.swift
++++ b/Cloudn/Views/Settings/SettingsView.swift
+@@ -5,7 +5,7 @@ import UIKit
+ import UniformTypeIdentifiers
+ 
+ struct SettingsView: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @State private var cacheCleared = false
+     @State private var pickingFolder = false
+     @State private var logCleared = false
+@@ -15,7 +15,7 @@ struct SettingsView: View {
+     @State private var logFile: URL?
+ 
+     var body: some View {
+-        @Bindable var settings = app.settings
++        @CNBindable var settings = app.settings
+         Form {
+             Group {
+                     Section {
+@@ -221,7 +221,7 @@ private struct AdaptiveStepper: View {
+ 
+ struct UpdateSheet: View {
+     let release: AppRelease
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     @Environment(\.dismiss) private var dismiss
+     @Environment(\.openURL) private var openURL
+     @State private var busy: String?
+@@ -451,7 +451,7 @@ struct LicenseView: View {
+ 
+ /// 平台图标风格：线性 / 实心，各带一排预览，点哪排选哪个
+ struct PlatformIconStylePicker: View {
+-    @Environment(AppModel.self) private var app
++    @EnvironmentObject private var app: AppModel
+     private let samples: [PlatformMark] = [.share(.quark), .share(.baidu), .share(.xunlei), .share(.pan115), .video(.bilibili), .video(.douyin), .github]
+ 
+     var body: some View {
+@@ -460,7 +460,7 @@ struct PlatformIconStylePicker: View {
+             ForEach(PlatformIconStyle.allCases) { style in
+                 let on = app.settings.platformIconStyle == style
+                 Button {
+-                    withAnimation(.snappy) { app.settings.platformIconStyle = style }
++                    withAnimation(.cnSnappy) { app.settings.platformIconStyle = style }
+                 } label: {
+                     HStack(spacing: 12) {
+                         SelectMark(on: on, size: 20)
+@@ -485,7 +485,7 @@ struct PlatformIconStylePicker: View {
+             }
+         }
+         .padding(.vertical, 4)
+-        .sensoryFeedback(.selection, trigger: app.settings.platformIconStyle)
++        .cnFeedback(.selection, trigger: app.settings.platformIconStyle)
+     }
+ }
+ 
+diff --git a/CloudnKit/Package.swift b/CloudnKit/Package.swift
+index 637a94f..d34dbf5 100644
+--- a/CloudnKit/Package.swift
++++ b/CloudnKit/Package.swift
+@@ -3,7 +3,7 @@ import PackageDescription
+ 
+ let package = Package(
+     name: "CloudnKit",
+-    platforms: [.iOS(.v17), .macOS(.v14)],
++    platforms: [.iOS(.v16), .macOS(.v14)],
+     products: [
+         .library(name: "CloudnKit", targets: ["CloudnKit"])
+     ],
+diff --git a/README.md b/README.md
+index 19eff5f..19a1d33 100644
+--- a/README.md
++++ b/README.md
+@@ -12,7 +12,7 @@
+ 网盘分享、短视频、网页视频、GitHub、磁力链接，一个 App 解析、预览、高速下载。
+ 
+ [![最新版本](https://img.shields.io/github/v/release/mengangs/Cloudn?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC&color=b5532f)](https://github.com/mengangs/Cloudn/releases/latest)
+-[![iOS 17+](https://img.shields.io/badge/iOS-17%2B-1f1e1c?logo=apple)](#安装)
++[![iOS 16.4+](https://img.shields.io/badge/iOS-16.4%2B-1f1e1c?logo=apple)](#安装)
+ [![SwiftUI](https://img.shields.io/badge/SwiftUI-%E5%8E%9F%E7%94%9F-f05138?logo=swift&logoColor=white)](#参与开发)
+ [![CI](https://github.com/mengangs/Cloudn/actions/workflows/ci.yml/badge.svg)](https://github.com/mengangs/Cloudn/actions/workflows/ci.yml)
+ [![License](https://img.shields.io/badge/license-AGPL--3.0-4b5d4f)](LICENSE)

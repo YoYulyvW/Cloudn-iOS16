@@ -1,0 +1,5 @@
+upstream-src/
+build/
+*.ipa
+*.xcarchive
+.DS_Store
