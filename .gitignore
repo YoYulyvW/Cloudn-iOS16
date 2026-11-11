@@ -3,3 +3,6 @@ build/
 *.ipa
 *.xcarchive
 .DS_Store
+
+__pycache__/
+*.pyc
