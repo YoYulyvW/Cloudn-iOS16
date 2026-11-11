@@ -206,7 +206,7 @@ index cdf5b27..68b5c37 100644
              listKind = .quark
 diff --git a/Cloudn/Compat/CNCompat.swift b/Cloudn/Compat/CNCompat.swift
 new file mode 100644
-index 0000000..0d99ffc
+index 0000000..b317b0f
 --- /dev/null
 +++ b/Cloudn/Compat/CNCompat.swift
 @@ -0,0 +1,183 @@
@@ -383,7 +383,7 @@ index 0000000..0d99ffc
 +
 +// MARK: - MainActor.assumeIsolated(iOS 17) 替代：调用点已保证在主线程
 +@inline(__always)
-+func cnAssumeMain<T>(_ body: @MainActor () -> T) -> T {
++func cnAssumeMain<T>(_ body: @MainActor @escaping () -> T) -> T {
 +    let raw = unsafeBitCast(body, to: (() -> T).self)
 +    return raw()
 +}

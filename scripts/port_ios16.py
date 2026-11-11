@@ -377,7 +377,7 @@ extension Animation {
 
 // MARK: - MainActor.assumeIsolated(iOS 17) 替代：调用点已保证在主线程
 @inline(__always)
-func cnAssumeMain<T>(_ body: @MainActor () -> T) -> T {
+func cnAssumeMain<T>(_ body: @MainActor @escaping () -> T) -> T {
     let raw = unsafeBitCast(body, to: (() -> T).self)
     return raw()
 }
