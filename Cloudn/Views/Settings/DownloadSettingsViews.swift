@@ -1,0 +1,52 @@
+// Cloudn · SPDX-License-Identifier: AGPL-3.0-or-later
+import CloudnKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+/// 限速档位（KB/s，0 为不限）
+enum SpeedLimitOption: Int, CaseIterable, Identifiable {
+    case unlimited = 0, k512 = 512, m1 = 1024, m2 = 2048, m5 = 5120, m10 = 10240, m20 = 20480
+
+    var id: Int { rawValue }
+    var title: String { rawValue == 0 ? "不限速" : ByteFormat.speed(Double(rawValue) * 1024) }
+}
+
+/// 按平台覆盖单任务连接数（键是下载来源，即平台显示名）
+struct PlatformConnectionsView: View {
+    @EnvironmentObject private var app: AppModel
+
+    private var sources: [String] {
+        SharePlatform.allCases.map(\.displayName) + VideoPlatform.allCases.map(\.displayName) + ["GitHub", "直链"]
+    }
+
+    var body: some View {
+        Form {
+            Group {
+                Section {
+                    ForEach(sources, id: \.self) { source in
+                        Picker(source, selection: binding(source)) {
+                            Text("默认（\(DownloadSettings().connections(for: source))）").tag(0)
+                            ForEach(1...16, id: \.self) { Text("\($0)").tag($0) }
+                        }
+                    }
+                } footer: {
+                    Text("每个任务同时开几条连接，越多越快。默认 \(DownloadSettings().connectionsPerTask) 条；百度、115 对并发敏感，默认最多 2 条。遇到 403 或频繁失败时可调低。")
+                }
+            }
+            .listRowBackground(Color.surface)
+        }
+        .paperList()
+        .navigationTitle("按平台设置连接数")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func binding(_ source: String) -> Binding<Int> {
+        Binding(
+            get: { app.settings.connectionsBySource[source] ?? 0 },
+            set: { value in
+                if value == 0 { app.settings.connectionsBySource[source] = nil } else { app.settings.connectionsBySource[source] = value }
+            }
+        )
+    }
+}
+

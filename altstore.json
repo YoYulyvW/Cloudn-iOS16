@@ -1,0 +1,68 @@
+{
+  "name": "Cloudn",
+  "subtitle": "网盘分享与短视频高速解析下载",
+  "description": "粘贴分享链接，浏览并高速下载网盘文件与短视频，所有解析在手机本地完成，无服务器不收集数据。",
+  "identifier": "com.mengangs.cloudn.source",
+  "sourceURL": "https://raw.githubusercontent.com/mengangs/Cloudn/main/altstore.json",
+  "website": "https://github.com/mengangs/Cloudn",
+  "iconURL": "https://raw.githubusercontent.com/mengangs/Cloudn/main/docs/assets/icon-light.png",
+  "tintColor": "B4532F",
+  "featuredApps": [
+    "com.mengangs.Cloudn"
+  ],
+  "apps": [
+    {
+      "name": "Cloudn",
+      "bundleIdentifier": "com.mengangs.Cloudn",
+      "developerName": "mengangs",
+      "subtitle": "网盘分享与短视频高速解析下载",
+      "localizedDescription": "粘贴一个链接，剩下的交给它。\n\n• 支持 19+ 网盘分享浏览与高速下载（夸克、UC、百度、迅雷、115、123、阿里、天翼、OneDrive、Google Drive、Dropbox、PikPak 等）\n• 支持近 50 个短视频与图集平台去水印、原图与实况照片保存\n• 支持 GitHub Release/源码下载、BT 磁力链与内置浏览器视频嗅探/录屏\n• 所有解析均在本地完成，账号凭证保存在系统钥匙串中",
+      "iconURL": "https://raw.githubusercontent.com/mengangs/Cloudn/main/docs/assets/icon-light.png",
+      "tintColor": "B4532F",
+      "category": "utilities",
+      "screenshotURLs": [
+        "https://raw.githubusercontent.com/mengangs/Cloudn/main/docs/assets/screenshots/showcase-light.jpg",
+        "https://raw.githubusercontent.com/mengangs/Cloudn/main/docs/assets/screenshots/extras-light.jpg"
+      ],
+      "versions": [
+        {
+          "version": "1.4.2",
+          "buildVersion": "15",
+          "date": "2026-11-14T07:41:16Z",
+          "localizedDescription": "# Cloudn 1.4.2\n\n这一版新增 SideStore / AltStore 侧载软件源支持，修复 Instagram 网页登录点「完成」卡住的问题，并带来多项稳定性、解析与性能优化。\n\n## 新增与改进\n\n- **SideStore / AltStore 软件源**：新增 [altstore.json](https://raw.githubusercontent.com/mengangs/Cloudn/main/altstore.json) 订阅源并在发版时自动更新；在「设置 › 更新 › 添加侧载软件源」中可一键添加到 SideStore / AltStore 或复制源地址。\n- **Instagram 网页登录修复**：支持从 `sessionid` 提取用户 ID 并补全 `ds_user_id`，实时合并页面 `document.cookie`，放宽非登录页重定向时的校验误判，并在未检测到登录态或校验失败时弹出明确提示。\n- **并发与稳定性优化**：加强下载与解析任务防重入保护、完善各网盘/视频解析器与分享扩展边界处理，提升列表滚动、实时活动与无障碍体验。\n\n## 安装\n\n推荐通过 SideStore / AltStore 订阅本仓库软件源直接接收更新；也可下载下方附件里的 `Cloudn-v1.4.2.ipa` 自行签名后安装（需要 iOS 17 及以上）。",
+          "downloadURL": "https://github.com/mengangs/Cloudn/releases/download/v1.4.2/Cloudn-v1.4.2.ipa",
+          "size": 9034290,
+          "sha256": "469881a2ebc827a2eaead2bdde9adaee469d4c34aec6e7b0028ca0925c008885",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.4.1",
+          "buildVersion": "14",
+          "date": "2026-10-24T03:52:30Z",
+          "localizedDescription": "提升解析速度，并让网页嗅探更快找到视频：\n• 抖音网页验证与分享页并行解析，缩短等待时间\n• 抖音、Facebook、小黑盒、快手主页输入时预热隐藏浏览器\n• 10 分钟内重复解析同一链接直接复用结果\n• 网页嗅探同步扫描页面源码中的音视频直链\n• 新增解析耗时诊断日志记录",
+          "downloadURL": "https://github.com/mengangs/Cloudn/releases/download/v1.4.1/Cloudn-v1.4.1.ipa",
+          "size": 8979537,
+          "sha256": "e86aefcfc9868bbd997c4cfc018ab98e51644ab91b371e0dab60cdc5abcc84f0",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.4.0",
+          "buildVersion": "13",
+          "date": "2026-10-24T03:00:25Z",
+          "localizedDescription": "界面与交互打磨：\n• 支持 iPad 侧栏（iOS 18+）与拖放解析\n• 下载完成支持一键「保存」到相册或文件\n• 直链失效自动换链重试，出错提供下一步操作建议\n• 优化网页嗅探推荐标记、批量解析总进度条与无障碍支持",
+          "downloadURL": "https://github.com/mengangs/Cloudn/releases/download/v1.4.0/Cloudn-v1.4.0.ipa",
+          "size": 8947906,
+          "sha256": "69412cee999a9051c7c55559d6729b1a81b89ee6128cd8df0a20b197ce738b47",
+          "minOSVersion": "17.0"
+        }
+      ],
+      "appPermissions": {
+        "entitlements": [],
+        "privacy": {
+          "NSPhotoLibraryAddUsageDescription": "用于把下载的图片和视频保存到相册"
+        }
+      }
+    }
+  ],
+  "news": []
+}
