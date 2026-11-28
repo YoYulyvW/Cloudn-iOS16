@@ -1,0 +1,16 @@
+.DS_Store
+build/
+DerivedData/
+Payload/
+*.ipa
+*.xcuserstate
+xcuserdata/
+.build/
+.swiftpm/
+CloudnKit/.build/
+CloudnKit/.swiftpm/
+*.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+__pycache__/
+# 截图工作流写进 wip-shots 分支的预览图（不进 main）
+preview/
+/xtool/
